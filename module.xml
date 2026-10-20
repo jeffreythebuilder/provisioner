@@ -1,0 +1,143 @@
+<module>
+  <rawname>provisioner</rawname>
+  <name>Provisioner</name>
+  <version>1.4.41</version>
+  <publisher>Generated Module</publisher>
+  <license>GPLv3</license>
+  <changelog>*1.4.41* Provisions PBX DND and call-forward enable/disable feature codes for Digium A-series and Alcatel/ALE phones, respecting customized and disabled PBX codes without setting handset feature state or forwarding destinations.
+  *1.4.40* Standardizes action buttons and import completion, simplifies Reports into searchable history and compact phone details, and preserves report filters, pages, sorting, and expanded details during live updates. Adds narrow-screen report cards and full-history search.
+  *1.4.39* Makes report actions clearer and changes report details to a responsive, searchable, paginated table for large batches.
+  *1.4.38* Normalizes Reports-tab button sizing, spacing, icon alignment, and button treatment with the rest of the module.
+  *1.4.37* Simplifies the saved-import result and aligns Batch Reports with the module’s compact controls, summary tiles, status badges, and readable report tables.
+  *1.4.36* Moves Bulk Handler import review into a readable, scrollable modal with clear validation totals, filtering, and an explicit Save mappings action.
+  *1.4.35* Closes the simplified Bulk Handler tab before the Provisioning and Discovery tabs so their content no longer appears under Bulk Handler.
+  *1.4.34* Combines push/retry and reboot actions into scoped controls, gives Diagnostics a full-width wrapping push timeline, and simplifies Bulk Handler navigation and panels.
+  *1.4.33* Aligns Phone Status actions in a consistent toolbar and keeps Latest Push details and IP evidence inside a responsive, wrapping panel.
+  *1.4.32* Improves diagnostic push-stage spacing and makes Push Config badge counts follow the selected phones.
+  *1.4.31* Removes the redundant Phone Status Refresh button; live updates remain primary and returning to the tab refreshes when live updates are paused.
+  *1.4.30* Streamlines the Phone Status, import review, batch reports, and discovery screens with compact summaries, dropdown filters, and collapsible secondary details.
+  *1.4.29* Refines Phone Status with separate registration/push filters and direct actions; adds an explicit three-step CSV review/save flow, readable batch progress and CSV downloads; clarifies scan coverage and exclusions; and organizes diagnostics around phone identity, push target, and latest outcome.
+  *1.4.28* Adds validated CSV import previews with atomic saves, extension-swap and target-readiness checks, and persistent per-phone bulk push reports with linked retries and background verification results.
+  *1.4.27* Restores the three-pass ping/ARP sweep for directly connected discovery ranges, supplements local MAC identities with SIP model/firmware information, retains routed SIP discovery and explicit MAC identification, and shows separate local sweep and SIP probe progress.
+  *1.4.26* Adds read-only routed-subnet SIP OPTIONS discovery for Digium and Alcatel/ALE, explicit selected-IP Identify MAC through an isolated HTTP 404 receiver, persistent MAC/IP evidence for Bulk Handler mappings, and mandatory matching handset identity before cross-subnet pushes or retries.
+  *1.4.25* Adds event-driven Phone Status Live Updates through a shared Asterisk listener and authenticated SSE; fixes initial control visibility, remembers preferences, preserves table state, and reconnects with recovery synchronization.
+  *1.4.24* Shows the saved DHCP/static configuration mode beneath each IP in Phone Status, with pending-change labels and an explanatory tooltip.
+  *1.4.23* Completes the push modal after config delivery and verifies registration/IP/MAC in a detached background worker; preserves atomic swap finalization and adds documented ALE IPv4 configuration keys.
+  *1.4.22* Generates pending or missing configs before selected pushes, includes extension-swap partners automatically, preserves source addresses during edits, and clarifies registration-only routed-subnet discovery.
+  *1.4.21* Discovers registered phones across routed subnets using SIP User-Agent MACs; verifies extension/IP swaps against the handset identity and finalizes late swap verification as a group.
+  *1.4.20* Fixes cached file-access download detection in web pushes; reports live download/verification progress and observes mixed-brand batches together.
+  *1.4.19* Simplifies Phone Status by moving fetch and verification details into Diagnostics.
+  *1.4.18* Allows the ALE reboot/re-registration window to complete and adds late verification for downloads that finish after the initial wait.
+  *1.4.17* Tracks SIP trigger, config download, and final network verification separately; does not finalize a push from SIP 200 OK alone.
+  *1.4.16* Uses the reliable ALE M3s remote config-fetch NOTIFY after static network changes; keeps both documented and active provisioning URLs in generated XML.
+ *1.4.15* Supplies both documented and active ALE provisioning URLs for remote configuration after static network changes.
+ *1.4.14* Makes ALE M3s provisioning unattended: disables the Action URI confirmation prompt and uses the documented ACTION-URI Autop SIP trigger.
+ *1.4.13* Trusts the PBX for ALE Action URI control so authenticated remote administration works.
+*1.4.12* Enabled ALE Action URI reception with confirmation prompts for remote M3s administration.
+*1.4.11* Fixed cloud phonebook brand switching so each brand's fields load independently.
+*1.4.10* Grouped Digium and Alcatel cloud phonebook settings behind one brand selector.
+*1.4.9* Added authenticated ALE M3s remote phonebook settings and documented M3s XML configuration keys.
+*1.4.8* Set the default Digium phonebook URL format to explicitly request Digium XML output.
+*1.4.7* Added configurable authenticated Digium cloud phonebook name, URL, username, and password settings.
+*1.4.6* Added strict brand-specific pulled-config validation. Invalid HTML, nginx responses, login pages, malformed XML, and invalid Digium/Yealink formats are rejected before saving or reporting success.
+*1.4.5* Config Files tab: fixed case-sensitivity bug — files with uppercase MACs now appear. Digium pull: replaced Python requests with curl (handles malformed HTTP headers from Digium phones).
+*1.4.4* Phone Status: "Registered" now shows before "No Config" (fixes "Add Only" showing No Config for online phones). Digium pull: fixed crash on malformed auth header during config fetch.
+*1.4.3* DHCP Option 66: device discovery from DHCP lease file (dnsmasq.leases). Fixed "Apply Pending" after successful push — push now clears needs_changes flag. Configurable dhcp_leases_file path in settings.
+*1.4.2* Removed PnP daemon (pnp_server.py, pnp-server.service), PnP discovery tab, PnP deployment mode. Only DHCP Option 66 and SIP NOTIFY modes remain.
+*1.4.1* Replaced DHCP Leases tab with PnP Discovered Devices. Added clearPnpDiscovery(), getArpIpByMac() helper, pnp_discovered.json logging in pnp_server.py.
+*1.4.0* Yealink support (template, generate method, OUI prefixes). VLAN settings (global Voice/Data VLAN ID for Alcatel/Digium/Yealink). Alcatel template rewritten with latest XML param names. Admin password injection. Reset-to-default bug fixed (.dist files synced).
+*1.2.0* Hybrid IP resolution — store IP from discovery, auto-resolve from ARP/nmap at push time, stored IP fallback for cross-subnet phones
+*1.1.0* Discovery tab with Network Scan + PnP Listener + SIP NOTIFY push (no DHCP Option 66 required)
+*1.0.2* Alcatel config fetch + backup/restore, bulk pull/revert, Fetch-preview modal, brand-aware file paths
+*1.0.1* Option 66 validation, Bulk Handler UI fixes, copy provisioning URL, AUTO_INCREMENT fix
+*1.0.0* Initial release</changelog>
+  <category>Settings</category>
+  <description>Endpoint Provisioning Manager with DHCP-independent Digium and Alcatel/ALE discovery and MAC-aware SIP provisioning across local and routed subnets.</description>
+  <menuitems>
+    <provisioner>Provisioner</provisioner>
+  </menuitems>
+  <supported>13.0</supported>
+  <database>
+    <table name="provisioner_batches">
+      <field name="id" type="string" length="32" primarykey="true" notnull="true"/>
+      <field name="kind" type="string" length="20" notnull="true"/>
+      <field name="parent_id" type="string" length="32" notnull="false"/>
+      <field name="status" type="string" length="20" notnull="true"/>
+      <field name="created_at" type="datetime" notnull="true"/>
+      <field name="finished_at" type="datetime" notnull="false"/>
+    </table>
+    <table name="provisioner_batch_items">
+      <field name="batch_id" type="string" length="32" primarykey="true" notnull="true"/>
+      <field name="mac" type="string" length="12" primarykey="true" notnull="true"/>
+      <field name="job_id" type="string" length="32" notnull="false"/>
+      <field name="data" type="text" notnull="true"/>
+      <index name="batch_job"><field name="job_id"/></index>
+    </table>
+    <table name="provisioner_logs">
+      <field name="id" type="integer" primarykey="true" notnull="true" autoincrement="true"/>
+      <field name="timestamp" type="datetime" notnull="true"/>
+      <field name="action" type="string" length="255" notnull="true"/>
+      <field name="details" type="text"/>
+      <field name="status" type="string" length="50"/>
+    </table>
+    <table name="provisioner_devices">
+      <field name="id" type="integer" primarykey="true" notnull="true" autoincrement="true"/>
+      <field name="mac_address" type="string" length="12" notnull="true"/>
+      <field name="extension" type="string" length="20" notnull="true"/>
+      <field name="description" type="string" length="255"/>
+      <field name="brand" type="string" length="50" notnull="false" default="digium"/>
+      <field name="created_at" type="datetime"/>
+      <field name="updated_at" type="datetime"/>
+      <field name="needs_changes" type="integer" default="1" notnull="true"/>
+      <field name="previous_extension" type="string" length="20" notnull="false"/>
+      <field name="previous_description" type="string" length="255" notnull="false"/>
+      <field name="custom_config" type="integer" default="0" notnull="true"/>
+      <field name="ip_address" type="string" length="45" notnull="false"/>
+      <field name="last_ack_at" type="datetime" notnull="false"/>
+      <field name="last_push_status" type="string" length="20" notnull="false"/>
+      <field name="last_push_attempt_at" type="datetime" notnull="false"/>
+      <field name="last_push_job_id" type="string" length="32" notnull="false"/>
+      <field name="last_fetch_at" type="datetime" notnull="false"/>
+      <field name="last_fetch_ip" type="string" length="45" notnull="false"/>
+      <field name="last_fetch_status" type="string" length="20" notnull="false"/>
+      <field name="last_verify_at" type="datetime" notnull="false"/>
+      <field name="last_verify_ip" type="string" length="45" notnull="false"/>
+      <field name="last_verify_status" type="string" length="20" notnull="false"/>
+      <field name="static_ip" type="string" length="45" notnull="false"/>
+      <field name="static_mask" type="string" length="15" notnull="false"/>
+      <field name="static_gw" type="string" length="45" notnull="false"/>
+      <field name="previous_static_ip" type="string" length="45" notnull="false"/>
+      <field name="previous_static_mask" type="string" length="15" notnull="false"/>
+      <field name="previous_static_gw" type="string" length="45" notnull="false"/>
+      <index name="mac_address" unique="true">
+        <field name="mac_address"/>
+      </index>
+    </table>
+    <table name="provisioner_push_jobs">
+      <field name="id" type="string" length="32" primarykey="true" notnull="true"/>
+      <field name="status" type="string" length="20" notnull="true"/>
+      <field name="payload" type="text" notnull="true"/>
+      <field name="created_at" type="datetime" notnull="true"/>
+      <field name="finished_at" type="datetime" notnull="false"/>
+      <field name="error" type="text" notnull="false"/>
+    </table>
+    <table name="provisioner_discovery_observations">
+      <field name="mac_address" type="string" length="12" primarykey="true" notnull="true"/>
+      <field name="ip_address" type="string" length="45" notnull="true"/>
+      <field name="brand" type="string" length="50" notnull="true"/>
+      <field name="model" type="string" length="100"/>
+      <field name="firmware" type="string" length="100"/>
+      <field name="sip_port" type="integer" default="5060"/>
+      <field name="sip_transport" type="string" length="10" default="udp"/>
+      <field name="source" type="string" length="100"/>
+      <field name="last_seen" type="datetime" notnull="true"/>
+      <index name="ip_address" unique="true">
+        <field name="ip_address"/>
+      </index>
+    </table>
+    <table name="provisioner_settings">
+      <field name="key_name" type="string" length="100" primarykey="true" notnull="true"/>
+      <field name="value" type="text"/>
+    </table>
+  </database>
+</module>

@@ -1,0 +1,27 @@
+#!version:1.0.0.1
+
+account.1.enable = 1
+account.1.label = {ext}
+account.1.display_name = {display_name}
+account.1.user_name = {ext}
+account.1.auth_name = {ext}
+account.1.password = {secret}
+account.1.sip_server.1.address = {server_addr}
+account.1.sip_server.1.port = {server_port}
+account.1.transport = {transport}
+account.1.sip_listen_port = 5060
+
+network.internet_port.type = {wan_type}
+network.internet_port.ip = {static_ip}
+network.internet_port.mask = {static_mask}
+network.internet_port.gateway = {static_gw}
+network.primary_dns = {static_dns}
+network.static_dns_enable = {dns_enable}
+
+network.vlan.internet_port_enable = {vlan_enable}
+network.vlan.internet_port_vid = {vlan_id}
+network.vlan.pc_port_enable = {data_vlan_enable}
+network.vlan.pc_port_vid = {data_vlan_id}
+
+local_time.ntp_server1 = {ntp_server}
+auto_provision.dhcp_option.enable = 1

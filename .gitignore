@@ -1,0 +1,6 @@
+*.tar.gz
+__pycache__/
+*.py[cod]
+.phpunit.result.cache
+.DS_Store
+*.log

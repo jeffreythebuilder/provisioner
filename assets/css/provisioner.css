@@ -1,0 +1,155 @@
+#provisioner-app .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    min-height: 32px;
+    padding: 6px 10px;
+    margin: 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.2;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+#provisioner-app .btn .badge {
+    position: static;
+    top: auto;
+    margin: 0 0 0 2px;
+    padding: 3px 6px;
+    font-size: 11px;
+    line-height: 1;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, .12);
+    color: inherit;
+}
+
+#provisioner-app .btn > .fa {
+    flex: 0 0 auto;
+    font-size: 13px;
+    line-height: 1;
+    color: inherit;
+}
+
+#provisioner-app .btn-default,
+#provisioner-app .btn-secondary {
+    background: #fff;
+    border-color: #c6ced5;
+    color: #354555;
+}
+
+#provisioner-app .btn-default:hover,
+#provisioner-app .btn-default:focus,
+#provisioner-app .btn-secondary:hover,
+#provisioner-app .btn-secondary:focus {
+    background: #edf1f4;
+    border-color: #aab6c1;
+    color: #253545;
+}
+
+#provisioner-app .btn-primary {
+    background: #337ab7;
+    border-color: #2e6da4;
+    color: #fff;
+}
+
+#provisioner-app .btn-primary:hover,
+#provisioner-app .btn-primary:focus,
+#provisioner-app .btn-primary:active {
+    background: #286090;
+    border-color: #204d74;
+    color: #fff;
+}
+
+#provisioner-app .btn-warning {
+    background: #f0ad4e;
+    border-color: #eea236;
+    color: #49320e;
+}
+
+#provisioner-app .btn-warning:hover,
+#provisioner-app .btn-warning:focus {
+    background: #ec971f;
+    border-color: #d58512;
+    color: #382607;
+}
+
+#provisioner-app .btn-danger {
+    background: #d9534f;
+    border-color: #d43f3a;
+    color: #fff;
+}
+
+#provisioner-app .btn-danger:hover,
+#provisioner-app .btn-danger:focus {
+    background: #c9302c;
+    border-color: #ac2925;
+    color: #fff;
+}
+
+#provisioner-app .btn-link {
+    background: transparent;
+    border-color: transparent;
+    color: #337ab7;
+}
+
+#provisioner-app .btn:disabled,
+#provisioner-app .btn.disabled {
+    opacity: .55;
+    cursor: not-allowed;
+}
+
+#provisioner-app .btn:focus-visible {
+    outline: 2px solid #245a85;
+    outline-offset: 2px;
+}
+
+#provisioner-app .table pre {
+    margin: 0;
+    font-size: 12px;
+}
+
+#provisioner-app .provisioner-configured-mode {
+    display: inline-block;
+    margin-top: 3px;
+    font-size: 11px;
+    font-weight: normal;
+    white-space: nowrap;
+    background-color: #e8f1f8;
+    color: #36566f;
+}
+
+#provisioner-app .provisioner-configured-mode.is-pending {
+    background-color: #fcf3dc;
+    color: #856404;
+}
+
+#provisioner-app .nav-tabs {
+    margin-bottom: 0;
+}
+
+#provisioner-app .card {
+    margin-bottom: 20px;
+}
+
+#provisioner-app .import__export__btn.active,
+#provisioner-app .nav-pills > li.active > .import__export__btn {
+    background-color: #4c9471;
+    color: #fff;
+    text-decoration: none;
+}
+
+#provisioner-app .import__export__btn {
+    border-radius: 5px !important;
+    margin-right: 5px;
+    border-color: rgba(94, 156, 125, 0.9) !important;
+}
+
+#provisioner-app .import__export__btn:focus,
+#provisioner-app .import__export__btn:hover {
+    text-decoration: none;
+    background-color: #4c9471;
+    color: #fff;
+}

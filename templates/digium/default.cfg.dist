@@ -1,0 +1,73 @@
+<<VOIP CONFIG FILE>>Version:2.0002
+
+<GLOBAL CONFIG MODULE>
+WAN Mode           :{{WAN_MODE}}
+WAN IP             :{{STATIC_IP}}
+WAN Subnet Mask    :{{STATIC_MASK}}
+WAN Gateway        :{{STATIC_GW}}
+Primary DNS        :{{STATIC_DNS}}
+Enable DHCP        :{{DHCP_ENABLED}}
+SNTP Server        :{{NTP_SERVER}}
+Time Zone          :32
+Time Zone Name     :UTC+8
+Enable DST         :0
+</GLOBAL CONFIG MODULE>
+
+<SIP CONFIG MODULE>
+--SIP Line List--  :
+SIP1 Phone Number  :{{EXTENSION}}
+SIP1 Display Name  :{{EXTENSION}}
+SIP1 Sip Name      :
+SIP1 Register Addr :{{PBX_IP}}
+SIP1 Register Port :{{SIP_PORT}}
+SIP1 Register User :{{EXTENSION}}
+SIP1 Register Pswd :{{SECRET}}
+SIP1 Register TTL  :3600
+SIP1 Enable Reg    :1
+SIP1 Proxy Addr    :{{PBX_IP}}
+SIP1 Proxy Port    :{{SIP_PORT}}
+SIP1 Subscribe     :1
+SIP1 MWI Num       :*97
+SIP1 Transport     :{{TCP_UDP}}
+SIP1 SvcCode Mode  :1
+SIP1 DNDOn SvcCode :{{DND_ON_CODE}}
+SIP1 DNDOff SvcCode:{{DND_OFF_CODE}}
+SIP1 CFUOn SvcCode :{{CF_ALL_ON_CODE}}
+SIP1 CFUOff SvcCode:{{CF_ALL_OFF_CODE}}
+SIP1 CFBOn SvcCode :{{CF_BUSY_ON_CODE}}
+SIP1 CFBOff SvcCode:{{CF_BUSY_OFF_CODE}}
+SIP1 CFNOn SvcCode :{{CF_NOANSWER_ON_CODE}}
+SIP1 CFNOff SvcCode:{{CF_NOANSWER_OFF_CODE}}
+</SIP CONFIG MODULE>
+
+<QOS CONFIG MODULE>
+Enable VLAN        :{{VLAN_ENABLED}}
+VLAN ID            :{{VLAN_ID}}
+PVID Value         :{{DATA_VLAN_ID}}
+</QOS CONFIG MODULE>
+
+<PHONE CONFIG MODULE>
+LCD Title          :{{EXTENSION}}
+Time Display Style :1
+--Xml PhoneBook--  :
+XML-PBook1 Name    :{{PHONEBOOK_NAME}}
+XML-PBook1 Addr    :{{PHONEBOOK_URL}}
+XML-PBook1 Auth    :{{PHONEBOOK_AUTH}}
+XML-PBook1 Policy  :0
+XML-PBook1 Sipline :0
+XML-PBook1 BindLine:0
+--Function Key--   :
+Fkey1 Type         :2
+Fkey1 Value        :SIP1
+Fkey1 Title        :
+Fkey2 Type         :0
+Fkey2 Value        :
+Fkey2 Title        :
+Fkey3 Type         :0
+Fkey3 Value        :
+Fkey3 Title        :
+Fkey4 Type         :0
+Fkey4 Value        :
+Fkey4 Title        :
+
+<<END OF FILE>>

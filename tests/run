@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+php tests/run.php
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests/test_fetch_digium.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests/test_discovery.py
+php -l Provisioner.class.php
+php -l views/main.php
+php -l verify_push.php
+php -l live_status.php
+php -l lib/LiveStatus.php
+php -l page.provisioner.php
+php -l discovery_receiver.php
+php -l discovery_worker.php
+php -l lib/SipDiscovery.php
+php -l lib/BulkWorkflow.php
+node --check assets/js/provisioner.js
+node --check assets/js/live-status.js
+node --check assets/js/discovery.js
+node tests/test_live_status.js
+node tests/test_discovery.js
