@@ -4,6 +4,7 @@ $(document).ready(function () {
     data = data || {};
     data.module = 'provisioner';
     var isPush = ['applyChangesWithNotify', 'pushToPhones', 'pushConfigToPhones', 'retryPushForPhones', 'retryBatch', 'applyChanges'].indexOf(command) !== -1;
+    if (isPush && !data.request_id) data.request_id = 'push_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
     return $.ajax({
       url: 'ajax.php?module=provisioner&command=' + command,
       type: 'POST',
@@ -165,6 +166,7 @@ $(document).ready(function () {
 
   function pushRetryable(row) {
     if (!row || !rowMac(row)) return false;
+    if (pushNeedsDiscovery(row)) return false;
     if (Object.prototype.hasOwnProperty.call(row, 'push_retryable')) return flagIsTrue(row.push_retryable);
     if (flagIsTrue(row.push_in_progress)) return false;
     if (flagIsTrue(row.push_issue)) return true;
@@ -174,6 +176,34 @@ $(document).ready(function () {
 
   function pushRetryableRows() {
     return phoneStatusRows().filter(pushRetryable);
+  }
+
+  function pushNeedsDiscovery(row) {
+    if (!row) return false;
+    if (row.push_next_action) return row.push_next_action === 'discovery';
+    var current = phoneStatusRows().find(function (candidate) { return rowMac(candidate) === rowMac(row); });
+    return !!current && current.push_next_action === 'discovery';
+  }
+
+  function discoveryRequiredRows() {
+    return phoneStatusRows().filter(function (row) { return pushNeedsDiscovery(row) && (flagIsTrue(row.push_issue) || flagIsTrue(row.needs_changes)); });
+  }
+
+  var discoveryReportReturn = null;
+
+  function openDeviceDiscovery(macs, reportId) {
+    var unique = Array.from(new Set((macs || []).filter(Boolean)));
+    discoveryReportReturn = reportId ? {id:reportId, macs:unique.slice()} : null;
+    $('#applyModal').modal('hide');
+    $('#deviceDiagnosticsModal').modal('hide');
+    $('#discoveryPushHint').text('Before pushing, scan the phones\' subnet and use Identify MAC for unknown SIP responders. '
+      + (unique.length ? unique.length + ' mapped ' + pluralWord(unique.length, 'phone') + ' need discovery: ' + unique.slice(0, 8).join(', ') + (unique.length > 8 ? '…' : '') + '. ' : '')
+      + 'No scan or push starts automatically. '
+      + (reportId ? 'After identification, use Phone Status to select these MACs and start a new push. The original report remains the record of the blocked attempt.'
+        : 'Return to your original selection after identification.')).show();
+    $('#discoveryReportReturn').toggle(!!discoveryReportReturn);
+    $('a[href="#discovered"]').tab('show');
+    $('#scan-subnet-input').trigger('focus');
   }
 
   function rebootEligible(row) {
@@ -197,6 +227,7 @@ $(document).ready(function () {
         icon: 'fa-paper-plane',
         tone: 'btn-primary',
         title: 'Push config to ' + selected.length + ' selected ' + pluralWord(selected.length, 'phone') + '.'
+          + (source === 'devices' ? ' Handset identity is checked before delivery; blocked phones are explained in Batch Reports.' : '')
       };
     } else if (retryRows.length) {
       action = {
@@ -354,6 +385,9 @@ $(document).ready(function () {
       selectedPushAction = 'push';
       openApplyModal('push');
     });
+    $('.discover-phone-btn').off('click').on('click', function () {
+      openDeviceDiscovery([String($(this).data('mac') || '')]);
+    });
     updateActionButtons();
     renderPhoneStatusSummary();
   });
@@ -391,11 +425,31 @@ $(document).ready(function () {
     return $('<div>').text(value == null || value === '' ? '—' : value).html();
   }
 
+  var diagnosticSummaryText = '', diagnosticRequestId = 0;
+
+  function diagnosticLabel(kind, value) {
+    var labels = {
+      source: {pjsip:'SIP registration',discovery:'Recent handset identification',stored:'Last-known address',static_ip:'Configured static address',previous_static_ip:'Previous static address',dhcp:'DHCP lease',arp:'Local ARP evidence',arp_pjsip:'Local ARP and SIP registration agree'},
+      registration: {Avail:'Registered and responding',Unavail:'Registered contact is not responding',Unknown:'Unknown','Not registered':'Not registered'},
+      network: {cross_subnet:'Routed network (another subnet)',cross_subnet_mac_identified:'Routed network; handset identified',cross_subnet_unidentified:'Routed network; MAC identification needed',local_verified:'Local network; ARP and registration agree',local_mac_verified:'Local network; MAC confirmed by ARP',unresolved:'No usable target',conflict:'Conflicting target evidence'},
+      verification: {verified:'Verified',failed:'Failed',pending:'Pending',verifying:'Checking registration and identity'}
+    };
+    return labels[kind] && labels[kind][value] || value || '—';
+  }
+
   function loadDeviceDiagnostics(mac, active) {
+    var requestId = ++diagnosticRequestId;
+    diagnosticSummaryText = '';
+    $('#copyDiagnosticSummaryBtn').prop('disabled', true);
+    $('#diagnosticDiscoveryBtn').hide();
+    $('#diagnosticCopyFallback').hide();
+    $('#diagnosticCopyText').val('');
+    $('#diagnosticCopyStatus').text('');
     var loadingText = active ? 'Running fresh ARP verification...' : 'Loading diagnostics...';
     $('#deviceDiagnosticsBody').html('<p class="text-muted"><i class="fa fa-spinner fa-spin"></i> ' + loadingText + '</p>');
     $('#runFreshDiagnosticsBtn').prop('disabled', true);
     $('#verifyPushStatusBtn').hide().prop('disabled', true).data('mac', mac);
+    $('#manualVerificationNotice').hide().text('');
     $.ajax({
       url: 'ajax.php?module=provisioner&command=getDeviceDiagnostics',
       type: 'POST',
@@ -403,6 +457,7 @@ $(document).ready(function () {
       dataType: 'json',
       timeout: active ? 30000 : 8000
     }).done(function (res) {
+      if (requestId !== diagnosticRequestId) return;
       $('#runFreshDiagnosticsBtn').prop('disabled', false);
       if (!res || !res.success) {
         $('#deviceDiagnosticsBody').html('<div class="alert alert-danger">' + diagnosticsEsc(res ? res.error : 'Diagnostics request failed') + '</div>');
@@ -414,8 +469,17 @@ $(document).ready(function () {
       var config = res.config || {};
       var lastPush = res.last_push || {};
       var verificationJob = res.verification_job || {};
+      diagnosticSummaryText = res.diagnostic_summary || '';
+      $('#copyDiagnosticSummaryBtn').prop('disabled', !diagnosticSummaryText);
+      $('#diagnosticDiscoveryBtn').toggle(target.next_action === 'discovery').data('mac', device.mac || mac);
       var canVerifyPush = lastPush.fetch_status === 'downloaded' && lastPush.status !== 'verified';
-      $('#verifyPushStatusBtn').toggle(canVerifyPush).prop('disabled', false).data('mac', device.mac || mac);
+      var manualVerification = res.manual_verification || {};
+      var manualAllowed = manualVerification.allowed !== false;
+      var manualReason = manualVerification.reason || 'Automatic verification is in progress; wait for the saved report.';
+      $('#verifyPushStatusBtn').toggle(canVerifyPush).prop('disabled', !manualAllowed).data('mac', device.mac || mac)
+        .attr('title', manualAllowed ? 'Check the last downloaded config without resending it.' : manualReason)
+        .html('<i class="fa fa-search"></i> Verify Last Push');
+      $('#manualVerificationNotice').toggle(!manualAllowed).text(manualAllowed ? '' : manualReason);
       var manualIpMismatch = String(device.brand || '').toLowerCase() === 'alcatel'
         && device.static_ip && target.selected_ip && device.static_ip !== target.selected_ip
         && (lastPush.status === 'verified' || lastPush.status === 'success') && !device.needs_changes;
@@ -436,14 +500,18 @@ $(document).ready(function () {
        .html(arpUnavailable ? '<i class="fa fa-ban"></i> ARP Unavailable (Cross-Subnet)' : '<i class="fa fa-refresh"></i> Run Fresh ARP Check');
       var candidates = target.candidates || [];
       var selectedCandidate = candidates.find(function (candidate) { return candidate.selected || candidate.ip === target.selected_ip; }) || {};
-      var model = selectedCandidate.model || '';
-      var identitySource = selectedCandidate.identity_source || '';
+      var modelCandidate = candidates.find(function (candidate) { return candidate.ip === target.selected_ip && candidate.model; }) || selectedCandidate;
+      var model = modelCandidate.model || '';
+      var identitySource = modelCandidate.identity_source || '';
       var conclusion, conclusionClass = 'diagnostic-conclusion';
       if (target.conflict) {
         conclusion = '<strong>Push blocked: handset identity conflicts with this mapping.</strong> ' + diagnosticsEsc(target.conflict_message || 'Resolve the extension/MAC conflict before pushing.');
         conclusionClass += ' danger';
       } else if (target.mac_confirmation_required) {
         conclusion = '<strong>Push blocked: handset MAC/IP identity is required.</strong> ' + diagnosticsEsc(target.blocked_reason || 'Run discovery and identify this phone again.');
+        conclusionClass += ' warning';
+      } else if (!target.selected_ip) {
+        conclusion = '<strong>No current push target.</strong> ' + diagnosticsEsc(target.blocked_reason || 'Open Device Discovery, scan the phone subnet, and identify its MAC before pushing.');
         conclusionClass += ' warning';
       } else if (device.needs_changes) {
         conclusion = '<strong>Mapping changes are waiting to be pushed.</strong> Check the target and use Push Config when ready.';
@@ -456,9 +524,6 @@ $(document).ready(function () {
         conclusionClass += ' danger';
       } else if (lastPush.fetch_status === 'downloaded') {
         conclusion = '<strong>Config downloaded; final handset verification is incomplete.</strong> Use Verify Last Push after the phone reconnects.';
-        conclusionClass += ' warning';
-      } else if (!target.selected_ip) {
-        conclusion = '<strong>No current push target.</strong> ' + diagnosticsEsc(target.blocked_reason || 'Run discovery and check the network evidence.');
         conclusionClass += ' warning';
       } else if (!config.exists) {
         conclusion = '<strong>Target found; no config file is generated yet.</strong> Generate a config before provisioning.';
@@ -476,17 +541,19 @@ $(document).ready(function () {
       };
       var triggerStatus = lastPush.ack ? 'Accepted' : (lastPush.status === 'failed' ? 'Failed' : 'Not confirmed');
       var deliveryStatus = lastPush.fetch_status === 'downloaded' ? 'Downloaded' : (lastPush.fetch_status === 'failed' ? 'Failed' : 'Not confirmed');
-      var verifyStatus = lastPush.verify_status === 'verified' ? 'Verified' : (lastPush.verify_status || 'Not checked');
+      var verifyStatus = lastPush.verify_status ? diagnosticLabel('verification', lastPush.verify_status) : 'Not checked';
       var html = '<div class="' + conclusionClass + '">' + conclusion + '</div>';
        html += '<div class="row diagnostic-overview"><div class="col-md-6"><h5>1. Phone identity</h5><dl class="dl-horizontal">'
         + '<dt>Extension</dt><dd>' + diagnosticsEsc(device.extension) + '</dd>'
         + '<dt>Phone</dt><dd>' + diagnosticsEsc(model || device.brand) + (model ? '<br><small>' + diagnosticsEsc(device.brand) + '</small>' : '') + '</dd>'
-        + '<dt>MAC</dt><dd><code>' + diagnosticsEsc(device.mac) + '</code></dd>'
+         + '<dt>MAC</dt><dd><code>' + diagnosticsEsc(device.mac) + '</code></dd>'
+         + (modelCandidate.firmware ? '<dt>Firmware</dt><dd>' + diagnosticsEsc(modelCandidate.firmware) + '</dd>' : '')
         + (identitySource ? '<dt>Identity source</dt><dd>' + diagnosticsEsc(identitySource) + '</dd>' : '')
          + '</dl></div><div class="col-md-6"><h5>2. Push target</h5>'
          + '<p><strong>' + (target.selected_ip ? '<code>' + diagnosticsEsc(target.selected_ip) + '</code>' : '<span class="text-muted">No selected IP</span>') + '</strong>'
          + (target.is_stale_fallback ? ' <span class="label label-warning">Stale evidence</span>' : '') + '</p>'
-         + '<p>' + diagnosticsEsc(target.selected_source || target.blocked_reason || 'No target evidence available.') + '</p>'
+         + '<p>' + diagnosticsEsc(target.selected_source ? diagnosticLabel('source', target.selected_source) : target.blocked_reason || 'No target evidence available.') + '</p>'
+         + '<p><small>Registration: ' + diagnosticsEsc(diagnosticLabel('registration', target.pjsip_status)) + '<br>' + diagnosticsEsc(diagnosticLabel('network', target.resolution_mode)) + '</small></p>'
          + (selectedCandidate.mac_evidence ? '<p><small>MAC/IP evidence: ' + diagnosticsEsc(selectedCandidate.mac_evidence) + '</small></p>' : '')
          + (target.conflict ? '<div class="text-danger">' + diagnosticsEsc(target.conflict_message) + '</div>' : '')
          + (target.mac_confirmation_required ? '<div class="text-warning">' + diagnosticsEsc(target.blocked_reason) + '</div>' : '')
@@ -495,19 +562,21 @@ $(document).ready(function () {
          + pushStage('Download', deliveryStatus, lastPush.fetch_at, lastPush.fetch_status === 'downloaded' ? 'text-success' : '')
          + pushStage('Verification', verifyStatus, lastPush.verify_at, lastPush.verify_status === 'verified' ? 'text-success' : '') + '</div>'
          + ((lastPush.fetch_ip || lastPush.verify_ip) ? '<div class="diagnostic-push-details">'
-           + (lastPush.fetch_ip ? '<span>Downloaded from ' + diagnosticsEsc(lastPush.fetch_ip) + '.</span>' : '')
+           + (lastPush.fetch_ip ? '<span>Downloaded from ' + diagnosticsEsc(lastPush.fetch_ip) + '.</span> ' : '')
            + (lastPush.verify_ip ? '<span>Verified at ' + diagnosticsEsc(lastPush.verify_ip) + '.</span>' : '')
            + '</div>' : '')
          + '</div></div></div>';
       if (verificationJob.error) html += '<div class="alert alert-warning" style="margin-top:10px;">' + diagnosticsEsc(verificationJob.error) + '</div>';
       html += '<details style="margin-top:12px;"><summary>Detailed evidence and config</summary>'
+        + '<p class="text-muted">Provisioner ' + diagnosticsEsc(res.module_version) + ' · FreePBX/PBXact framework ' + diagnosticsEsc(res.framework_version)
+        + ' · Asterisk ' + diagnosticsEsc(res.asterisk_version) + ' · PHP ' + diagnosticsEsc(res.php_version) + '</p>'
         + '<div class="row" style="margin-top:8px;"><div class="col-md-6"><dl class="dl-horizontal">'
-        + '<dt>Selected source</dt><dd>' + diagnosticsEsc(target.selected_source) + '</dd>'
+        + '<dt>Selected source</dt><dd>' + diagnosticsEsc(diagnosticLabel('source', target.selected_source)) + '</dd>'
         + '<dt>Confidence</dt><dd>' + diagnosticsEsc(target.confidence) + '</dd>'
-        + '<dt>Resolution mode</dt><dd>' + diagnosticsEsc(target.resolution_mode) + '</dd>'
-        + '<dt>ARP verification</dt><dd>' + (target.scan_performed ? 'Fresh scan: ' + diagnosticsEsc((target.scan_subnets || []).join(', ')) : '<span class="text-muted">Not run</span>') + '</dd>'
-        + '<dt>PJSIP registration</dt><dd>' + diagnosticsEsc(target.pjsip_status) + '</dd>'
-        + '<dt>Phone service</dt><dd>' + (service.reachable ? '<span class="text-success">TCP ' + diagnosticsEsc(service.port) + ' reachable</span>' : '<span class="text-danger">TCP ' + diagnosticsEsc(service.port) + ' unavailable</span>') + '</dd>'
+        + '<dt>Network / evidence</dt><dd>' + diagnosticsEsc(diagnosticLabel('network', target.resolution_mode)) + '</dd>'
+        + '<dt>ARP verification</dt><dd>' + (arpUnavailable ? 'Unavailable across routers; SIP/handset identity is used instead.' : target.scan_performed ? 'Fresh scan: ' + diagnosticsEsc((target.scan_subnets || []).join(', ')) : '<span class="text-muted">Not run</span>') + '</dd>'
+        + '<dt>SIP registration</dt><dd>' + diagnosticsEsc(diagnosticLabel('registration', target.pjsip_status)) + '</dd>'
+        + '<dt>Phone web interface</dt><dd>' + (service.reachable ? '<span class="text-success">TCP ' + diagnosticsEsc(service.port) + ' reachable</span>' : '<span class="text-muted">TCP ' + diagnosticsEsc(service.port) + ' unavailable</span>') + '<br><small>Management access only; not a SIP health check.</small></dd>'
         + '</dl></div><div class="col-md-6"><dl class="dl-horizontal">'
         + '<dt>Config file</dt><dd>' + diagnosticsEsc(config.filename) + '</dd>'
         + '<dt>Config state</dt><dd>' + (config.exists ? diagnosticsEsc(config.size) + ' bytes, ' + diagnosticsEsc(config.modified) + (config.valid ? ' <span class="label label-success">Valid</span>' : ' <span class="label label-danger">Invalid</span>') : '<span class="text-muted">Not generated</span>') + (config.custom ? ' <span class="label label-info">Custom</span>' : '') + '</dd>'
@@ -534,6 +603,7 @@ $(document).ready(function () {
       if (!service.fetch_supported) html += '<div class="alert alert-warning">Config fetch is not supported for this brand.</div>';
       $('#deviceDiagnosticsBody').html(html);
     }).fail(function (xhr, status) {
+      if (requestId !== diagnosticRequestId) return;
       $('#runFreshDiagnosticsBtn')
         .prop('disabled', false)
         .attr('title', 'Retry fresh ARP verification.')
@@ -543,6 +613,32 @@ $(document).ready(function () {
       $('#deviceDiagnosticsBody').html('<div class="alert alert-danger">' + diagnosticsEsc(message) + '</div>');
     });
   }
+
+  $('#diagnosticDiscoveryBtn').off('click').on('click', function () { openDeviceDiscovery([$(this).data('mac')]); });
+  $('#copyDiagnosticSummaryBtn').off('click').on('click', function () {
+    if (!diagnosticSummaryText) return;
+    var text = diagnosticSummaryText, requestId = diagnosticRequestId;
+    function fallback() {
+      if (requestId !== diagnosticRequestId) return;
+      $('#diagnosticCopyFallback').show();
+      $('#diagnosticCopyText').val(text).trigger('focus').trigger('select');
+      $('#diagnosticCopyStatus').text('Clipboard access is unavailable. Copy the selected summary with Ctrl+C (Cmd+C on Mac). It contains extension, MAC, and private IP details; review before sharing.');
+    }
+    if (window.navigator && window.navigator.clipboard && window.isSecureContext) {
+      try {
+        window.navigator.clipboard.writeText(text).then(function () {
+          if (requestId === diagnosticRequestId) $('#diagnosticCopyStatus').text('Diagnostic summary copied. Review device and network identifiers before sharing.');
+        }, fallback);
+      } catch (error) { fallback(); }
+    } else fallback();
+  });
+  $('#deviceDiagnosticsModal').on('hidden.bs.modal.provisionerCopy', function () {
+    diagnosticRequestId++;
+    diagnosticSummaryText = '';
+    $('#copyDiagnosticSummaryBtn').prop('disabled', true);
+    $('#diagnosticCopyFallback').hide();
+    $('#diagnosticCopyText').val('');
+  });
 
   $(document).off('click.provisionerDiagnostics', '.diagnostics-btn').on('click.provisionerDiagnostics', '.diagnostics-btn', function () {
     var mac = $(this).data('mac');
@@ -586,7 +682,7 @@ $(document).ready(function () {
   $('#verifyPushStatusBtn').off('click').on('click', function () {
     var button = $(this);
     var mac = button.data('mac');
-    if (!mac) return;
+    if (!mac || button.prop('disabled')) return;
     button.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Verifying...');
     ajax('verifyPushStatus', { mac: mac }, function (res) {
       if (res && res.success) {
@@ -629,6 +725,38 @@ $(document).ready(function () {
   });
 
   // MAC Mapping — bulk delete
+  var mappingGridWaiters = null;
+  function loadMappingGrid(params) {
+    if (mappingGridWaiters) { mappingGridWaiters.push(params); return; }
+    mappingGridWaiters = [params];
+    $.ajax({url: 'ajax.php?module=provisioner&command=getDeviceGrid',
+      type: 'GET', data: {}, dataType: 'json', timeout: 15000
+    }).done(function (rows) {
+      var waiters = mappingGridWaiters;
+      mappingGridWaiters = null;
+      if (!Array.isArray(rows)) {
+        showAlert('danger', 'Could not load MAC Mapping. Refresh to try again.');
+        waiters.forEach(function (waiter) { waiter.error({status: 200, responseJSON: rows}); });
+        return;
+      }
+      var selected = ($('#devicesTable').bootstrapTable('getSelections') || []).map(function (r) { return String(r.id); });
+      var columns = ($('#devicesTable').bootstrapTable('getOptions') || {}).columns || [];
+      var checkbox = [].concat.apply([], columns).filter(function (c) { return c.checkbox; })[0];
+      var stateField = checkbox && checkbox.field != null ? checkbox.field : 'state';
+      // Refreshes must not erase off-filter checkbox selections. Read the
+      // latest selection at completion, not a stale snapshot at request start.
+      rows = rows.map(function (r) {
+        var copy = Object.assign({}, r);
+        copy[stateField] = selected.indexOf(String(r.id)) !== -1;
+        return copy;
+      });
+      waiters.forEach(function (waiter) { waiter.success(rows); });
+    }).fail(function (xhr) {
+      var waiters = mappingGridWaiters;
+      mappingGridWaiters = null;
+      waiters.forEach(function (waiter) { waiter.error(xhr); });
+    });
+  }
   onTableSelect('devicesTable', 'id', selectedDeviceIds, true);
 
   $('#devicesTable').on('post-body.bs.table', function () {
@@ -1255,11 +1383,53 @@ $(document).ready(function () {
     $('.bulk-pill[href="' + target + '"]').addClass('active').closest('li').addClass('active');
     $('#import .bulk-handler-section').hide();
     $(target).show();
-    if (target !== '#bulkReportsSection') stopBatchReportPolling();
   }
   $(document).on('click', '.bulk-pill', function (e) {
     e.preventDefault();
     activateBulkSection($(this).attr('href'));
+  });
+
+  function activateLogsSection(target) {
+    $('.logs-pill').removeClass('active').closest('li').removeClass('active');
+    $('.logs-pill[href="' + target + '"]').addClass('active').closest('li').addClass('active');
+    $('#logs .logs-section').hide();
+    $(target).show();
+    if (target !== '#bulkReportsSection') stopBatchReportPolling();
+  }
+  var activityLogsTableReady = false, activityLogsWaiters = null;
+  function loadActivityLogs(params) {
+    // Bootstrap Table normally aborts its prior XHR on refresh. FreePBX's
+    // global AJAX handler treats that expected abort as an error. This table
+    // uses a shared request instead; never disable global error reporting.
+    if (activityLogsWaiters) { activityLogsWaiters.push(params); return; }
+    activityLogsWaiters = [params];
+    $.ajax({
+      url: 'ajax.php?module=provisioner&command=getLogGrid',
+      type: 'GET', dataType: 'json', timeout: 15000
+    }).done(function (rows) {
+      var waiters = activityLogsWaiters;
+      activityLogsWaiters = null;
+      $('#activityLogsError').hide();
+      waiters.forEach(function (waiter) { waiter.success(rows); });
+    }).fail(function (xhr) {
+      var waiters = activityLogsWaiters;
+      activityLogsWaiters = null;
+      $('#activityLogsError').show();
+      waiters.forEach(function (waiter) { waiter.error(xhr); });
+    });
+  }
+  function refreshActivityLogs() {
+    if (!activityLogsTableReady) {
+      activityLogsTableReady = true;
+      $('#logsTable').bootstrapTable({ajax: loadActivityLogs});
+    } else $('#logsTable').bootstrapTable('refresh');
+  }
+  $('#retryActivityLogsBtn').on('click', refreshActivityLogs);
+  $(document).on('click', '.logs-pill', function (e) {
+    e.preventDefault();
+    var target = $(this).attr('href');
+    activateLogsSection(target);
+    if (target === '#activityLogsSection') refreshActivityLogs();
   });
 
   // =====================
@@ -1480,14 +1650,59 @@ $(document).ready(function () {
   var batchRetryBusy = false, currentBatchReport = null, reportHasError = false, reportRequestPending = false, historyHasError = false;
   var historyTableReady = false, reportTableReady = false, historyRequestGeneration = 0, reportDisplayedId = '';
   var reportFilterActive = 'all', expandedReportMacs = {};
+  var reportViewActive = 'overview', reportStageFilter = '', reportStageFilterLabel = '';
+  var searchRangeReportReturn = '';
+  var mappingReportReturn = null, navigatingToMappingFromReport = false;
+  var reportLastCheckedTime = '';
+  var reportLiveEnabled = getUiPreference('provisioner-report-live-updates', 'on') !== 'off';
+  var reportPollFailures = 0;
+  function formatReportCheckTime(date) {
+    var d = date || new Date();
+    var pad = function (n) { return n < 10 ? '0' + n : String(n); };
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+  function renderReportPollStatus(state) {
+    var el = $('#batchReportPollStatus');
+    el.toggleClass('is-error', state === 'error');
+    var finished = !!currentBatchReport && !currentBatchReport.active;
+    var paused = !reportLiveEnabled || state === 'paused' || state === 'idle' || finished;
+    var reconnecting = !paused && (state === 'error' || (state === 'updating' && !reportLastCheckedTime));
+    var label = paused ? 'Paused' : reconnecting ? 'Reconnecting' : 'Live';
+    $('#batchReportLiveToggleBtn').removeClass('btn-default btn-success btn-warning btn-secondary')
+      .addClass(paused ? 'btn-secondary' : reconnecting ? 'btn-warning' : 'btn-success')
+      .prop('disabled', finished).attr('aria-pressed', reportLiveEnabled ? 'true' : 'false')
+      .html('<i class="fa ' + (paused ? 'fa-pause' : reconnecting ? 'fa-refresh fa-spin' : 'fa-circle') + '"></i> Live Updates · ' + label)
+      .attr('title', finished ? 'This report has finished. Use Refresh to check again.'
+        : 'Pause or resume report refreshes only; the provisioning job continues.' + (state === 'error' ? ' Refresh failed; automatic retry uses bounded backoff.' : ''));
+    el.text((state === 'error' ? 'Refresh failed · ' : '') + (reportLastCheckedTime
+      ? 'Last successful update ' + reportLastCheckedTime : 'Waiting for first report update'));
+  }
+  $('#batchReportLiveToggleBtn').on('click', function () {
+    if (!currentReportId || (currentBatchReport && !currentBatchReport.active)) return;
+    reportLiveEnabled = !reportLiveEnabled;
+    setUiPreference('provisioner-report-live-updates', reportLiveEnabled ? 'on' : 'off');
+    if (!reportLiveEnabled) { stopBatchReportPolling(false); renderReportPollStatus('paused'); }
+    else showBatchReport(currentReportId, false);
+  });
+  function scheduleReportRefresh(refresh, generation, delay) {
+    if (!reportLiveEnabled || document.hidden || !$('#bulkReportsSection').is(':visible')) {
+      renderReportPollStatus('paused'); return;
+    }
+    reportPollTimer = setTimeout(function () {
+      reportPollTimer = null;
+      if (generation !== reportPollGeneration) return;
+      if (reportLiveEnabled && !document.hidden && $('#bulkReportsSection').is(':visible')) refresh();
+      else renderReportPollStatus('paused');
+    }, delay);
+  }
   function readableBatchStatus(status) {
-    return ({submitted:'In progress', running:'In progress', complete:'Complete', incomplete:'Needs attention', failed:'Failed'})[status] || status || 'Unknown';
+    return ({queued:'Queued', submitted:'In progress', running:'In progress', complete:'Complete', incomplete:'Needs attention', failed:'Failed'})[status] || status || 'Unknown';
   }
   function batchStatusClass(status) {
-    return ({complete:'complete', submitted:'in-progress', running:'in-progress', incomplete:'attention', failed:'attention'})[status] || 'neutral';
+    return ({complete:'complete', queued:'in-progress', submitted:'in-progress', running:'in-progress', incomplete:'attention', failed:'attention'})[status] || 'neutral';
   }
   function readableOutcomeCount(status) {
-    return ({verified:'Verified', imported:'Mappings saved', running:'In progress', verifying:'Verifying', failed:'Failed',
+    return ({queued:'Queued', verified:'Verified', imported:'Mappings saved', running:'In progress', verifying:'Verifying', failed:'Failed',
       incomplete:'Needs attention', blocked:'Blocked', superseded:'Superseded'})[status] || status;
   }
   function readableBatchDate(value) {
@@ -1495,7 +1710,68 @@ $(document).ready(function () {
     var date = new Date(String(value).replace(' ', 'T'));
     return isNaN(date.getTime()) ? String(value) : date.toLocaleString();
   }
-  function stageView(stage, value) {
+  function readableBatchTimestamp(value) {
+    if (!value) return '—';
+    return readableBatchDate(value);
+  }
+  function readableReportBrand(brand) {
+    var key = String(brand || '').toLowerCase();
+    if (key === 'digium') return 'Digium';
+    if (key === 'alcatel') return 'Alcatel / ALE';
+    return brand ? String(brand).charAt(0).toUpperCase() + String(brand).slice(1) : '';
+  }
+  function readableReportSource(source) {
+    if (!source) return 'Not recorded';
+    return diagnosticLabel('source', source);
+  }
+  function hasRecordedIdentityEvidence(row) {
+    // Only the saved affirmative decision establishes preflight confirmation.
+    // Source labels, messages and optional ARP observations do not record that
+    // decision or bind it to the final target IP. Keep them as metadata only.
+    return row.identity_phase === 'identity_confirmed';
+  }
+  function identityStageInfo(row) {
+    var gen = stageState('generation', row.generation);
+    var trig = stageState('trigger', row.trigger);
+    var deliv = stageState('delivery', row.delivery);
+    var verif = stageState('verification', row.verification);
+    var group = reportOutcomeGroup(row.outcome);
+    var laterStageRan = gen.done || gen.failed || trig.done || deliv.done || verif.done;
+    var hasEvidence = hasRecordedIdentityEvidence(row);
+    var confirmed = hasEvidence;
+    if (confirmed) {
+      return {label: 'Identity confirmed', done: true, failed: false, active: false, unrecorded: false, tone: 'done', icon: 'fa-check-circle'};
+    }
+    if (['identity_blocked','search_range_needed','phone_not_found'].indexOf(row.identity_phase) !== -1) {
+      return {label: row.identity_phase === 'search_range_needed' ? 'Search range needed'
+        : row.identity_phase === 'phone_not_found' ? 'Lookup incomplete' : 'Identity blocked',
+        done: false, failed: true, active: false, unrecorded: false, tone: 'failed', icon: 'fa-times-circle'};
+    }
+    if (laterStageRan && !hasEvidence) {
+      return {label: 'Not recorded', done: false, failed: false, active: false, unrecorded: true, tone: 'pending', icon: 'fa-minus-circle'};
+    }
+    if (group === 'progress' && (row.outcome !== 'queued' || !!row.identity_phase)) {
+      var activeLabel = {
+        checking_identity: 'Checking identity',
+        finding: 'Finding phone',
+        identifying: 'Identifying MAC',
+        local_lookup: 'Refreshing local ARP'
+      }[row.identity_phase] || 'Checking identity';
+      return {label: activeLabel, done: false, failed: false, active: true, unrecorded: false, tone: 'active', icon: 'fa-spinner fa-spin'};
+    }
+    if (group === 'attention' && !laterStageRan) {
+      var action = reportPhoneRecoveryAction(row);
+      var failLabel = action === 'search_range' ? 'Search range needed'
+        : action === 'find' ? 'Lookup incomplete'
+        : action === 'discovery' ? 'Not confirmed'
+        : action === 'mapping' ? 'Mapping blocked'
+        : 'Identity blocked';
+      return {label: failLabel, done: false, failed: true, active: false, unrecorded: false, tone: 'failed', icon: 'fa-times-circle'};
+    }
+    return {label: row.outcome === 'queued' ? 'Waiting' : 'Not started', done: false, failed: false, active: false, unrecorded: false, tone: 'pending', icon: 'fa-circle-o'};
+  }
+  function stageState(stage, value, row) {
+    if (stage === 'identity' && row) return identityStageInfo(row);
     var labels = {
       generation: {generated:'Config ready', existing_config:'Config reused', custom_preserved:'Custom config kept', failed:'Config failed', not_started:'Config pending'},
       trigger: {accepted:'Triggered', failed:'Trigger failed', not_started:'Not sent'},
@@ -1508,17 +1784,197 @@ $(document).ready(function () {
       || (stage === 'verification' && value === 'verified');
     var failed = value === 'failed' || value === 'incomplete';
     var active = value === 'pending' || value === 'verifying';
-    var icon = done ? 'fa-check-circle' : (failed ? 'fa-times-circle' : (active ? 'fa-spinner' : 'fa-circle-o'));
-    return '<span class="batch-stage ' + (done ? 'done' : (failed ? 'failed' : (active ? 'active' : 'pending'))) + '"><i class="fa ' + icon + '"></i> ' + diagnosticsEsc(label) + '</span>';
+    var tone = done ? 'done' : (failed ? 'failed' : (active ? 'active' : 'pending'));
+    var icon = done ? 'fa-check-circle' : (failed ? 'fa-times-circle' : (active ? 'fa-spinner fa-spin' : 'fa-circle-o'));
+    return {label: label, done: done, failed: failed, active: active, tone: tone, icon: icon};
+  }
+  function stageView(stage, value, row) {
+    var state = stageState(stage, value, row);
+    return '<span class="batch-stage ' + state.tone + '"><i class="fa ' + state.icon + '"></i> ' + diagnosticsEsc(state.label) + '</span>';
   }
   function batchOutcomeView(row) {
     var tone = reportOutcomeGroup(row.outcome) === 'completed' ? 'complete' : (reportOutcomeGroup(row.outcome) === 'progress' ? 'in-progress' : 'attention');
-    return '<span class="bulk-status ' + tone + '">' + diagnosticsEsc(readableOutcomeCount(row.outcome) || 'Unknown') + '</span>';
+    var action = reportPhoneRecoveryAction(row);
+    var reason = row.error || '';
+    var next = '';
+    if (action === 'search_range') {
+      reason = 'No known phone IP or approved automatic search range was available.';
+      next = 'Save an approved range in PBX Settings, return to this report, and try finding again.';
+    } else if (action === 'find') {
+      reason = row.identity_message || row.error || 'Automatic handset identity lookup did not complete.';
+      next = 'Check connectivity and the approved search range, then use the retry action above to run lookup again.';
+    } else if (action === 'discovery') {
+      reason = 'No confirmed MAC/IP target was available for this handset.';
+      next = 'Scan the phones\' subnet, identify this MAC if needed, then start a new push.';
+    } else if (action === 'mapping') {
+      reason = row.mapping_changed ? 'The mapping changed since this attempt. Retrying the old mapping is blocked.' : 'This handset needs a valid extension mapping before pushing.';
+      next = 'Review MAC Mapping, then start a new push with the corrected assignment.';
+    } else if (action === 'diagnostics') {
+      reason = row.superseded_by_push ? 'A newer push replaced this attempt.' : row.retry_requires_review
+        ? 'Delivery is uncertain; this handset may already have received its config.' : row.error || 'Handset identity or verification needs review.';
+      next = 'Inspect current Diagnostics before deciding whether another push is needed.';
+    } else if (row.outcome === 'verified') {
+      reason = 'Registration, handset MAC, and final IP matched.';
+    } else if (row.outcome === 'imported') {
+      reason = 'Mapping saved. No configuration was pushed by this import.';
+    } else if (reportOutcomeGroup(row.outcome) === 'progress') {
+      reason = row.outcome === 'queued' ? 'Saved; waiting for the background scheduler.'
+        : row.trigger !== 'accepted' && row.identity_message ? row.identity_message
+        : row.delivery === 'downloaded' ? 'Config downloaded; automatic verification is in progress.' : 'The background worker is processing this phone.';
+    } else if (row.retryable) {
+      next = 'Use Retry Eligible Phones above; current mappings and targets are rechecked.';
+    }
+    var recovery = '';
+    var unavailable = !currentBatchReport || currentBatchReport.active || reportHasError;
+    if (action === 'search_range') recovery = '<button type="button" class="btn btn-info batch-phone-search-range"' + (unavailable ? ' disabled' : '') + '><i class="fa fa-cog"></i> Set Search Range</button>';
+    else if (action === 'discovery') recovery = '<button type="button" class="btn btn-info batch-phone-discovery"' + (unavailable ? ' disabled' : '') + '><i class="fa fa-search"></i> Open Discovery</button>';
+    else if (action === 'mapping') recovery = '<button type="button" class="btn btn-default batch-phone-mapping"' + (unavailable ? ' disabled' : '') + '><i class="fa fa-list"></i> Review Mapping</button>';
+    else if (action === 'diagnostics') recovery = '<button type="button" class="btn btn-default diagnostics-btn" data-mac="' + rowMac(row) + '"><i class="fa fa-stethoscope"></i> Diagnostics</button>';
+    return '<div class="bulk-report-result-top"><span class="bulk-status ' + tone + '">' + diagnosticsEsc(reportOutcomeLabel(row)) + '</span></div>'
+      + (reason ? '<small class="bulk-report-result-reason">' + diagnosticsEsc(reason.length > 180 ? reason.slice(0,177) + '…' : reason) + '</small>' : '')
+      + (next ? '<small class="bulk-report-result-next"><strong>Next:</strong> ' + diagnosticsEsc(next) + '</small>' : '')
+      + (recovery ? '<div class="bulk-report-row-actions">' + recovery + '</div>' : '');
+  }
+
+  function reportPhoneRecoveryAction(row) {
+    if (reportOutcomeGroup(row.outcome) !== 'attention') return '';
+    if (row.superseded_by_push) return 'diagnostics';
+    if (row.mapping_changed || row.next_action === 'mapping') return 'mapping';
+    if (row.retry_requires_review || row.next_action === 'diagnostics') return 'diagnostics';
+    if (row.can_auto_find) return 'find';
+    if (row.next_action === 'search_range') return row.retryable ? 'find' : 'search_range';
+    if (row.next_action === 'find') return 'find';
+    return row.next_action === 'discovery' ? 'discovery' : '';
+  }
+
+  function reportOutcomeLabel(row) {
+    if (reportOutcomeGroup(row.outcome) === 'progress' && row.trigger !== 'accepted') {
+      var phase = {checking_identity:'Checking identity',finding:'Finding phone',identifying:'Identifying MAC',identity_confirmed:'Identity confirmed',local_lookup:'Refreshing local discovery'}[row.identity_phase];
+      if (phase) return phase;
+    }
+    var action = reportPhoneRecoveryAction(row);
+    if (action === 'search_range') return 'Search range needed';
+    if (action === 'find') return row.next_action === 'search_range' ? 'Ready to find again' : 'Identity lookup incomplete';
+    if (row.superseded_by_push && action) return 'Newer push exists';
+    if (action === 'discovery') return 'Discovery required';
+    if (action === 'mapping') return 'Review mapping';
+    if (action === 'diagnostics') return row.retry_requires_review ? 'Review delivery' : 'Diagnostics needed';
+    return readableOutcomeCount(row.outcome) || 'Unknown';
+  }
+
+  function reportDiscoveryRows(report) {
+    if (!report || !report.batch || report.batch.kind !== 'push') return [];
+    return (report.items || []).filter(function (row) { return rowMac(row) && reportPhoneRecoveryAction(row) === 'discovery'; });
+  }
+
+  function reportRetryNeedsReview(report) {
+    var retry = report && report.retry_macs || [];
+    return !!report && (report.items || []).some(function (row) { return row.retry_requires_review && retry.indexOf(rowMac(row)) !== -1; });
+  }
+
+  function reportRetryIsFinding(report) {
+    var retry = report && report.retry_macs || [];
+    return retry.length > 0 && retry.every(function (mac) {
+      return (report.items || []).some(function (row) { return rowMac(row) === mac && (row.can_auto_find || ['find','search_range'].indexOf(row.next_action) !== -1); });
+    });
+  }
+
+  function openReportSearchRange() {
+    if (!currentBatchReport || currentBatchReport.active || reportHasError || reportRequestPending) return;
+    searchRangeReportReturn = currentReportId;
+    $('#settingsPushAdvanced').prop('open', true);
+    $('#pushSearchReportReturn').show();
+    $('a[href="#settings"]').tab('show');
+    $('#settingsPushSearchSubnets').trigger('focus');
+  }
+
+  function getDevicesTableSearch() {
+    var input = $('#devices .fixed-table-toolbar .search input').val();
+    if (typeof input === 'string') return input;
+    var opts = $('#devicesTable').bootstrapTable('getOptions');
+    if (opts && typeof opts.searchText === 'string') return opts.searchText;
+    return String($('#devicesTable').data('searchText') || '');
+  }
+
+  function setDevicesTableSearch(text) {
+    var val = String(text || '');
+    $('#devicesTable').data('searchText', val);
+    $('#devicesTable').bootstrapTable('resetSearch', val);
+  }
+
+  function clearMappingReportReturn(restoreSearch) {
+    if (!mappingReportReturn) return;
+    var prevSearch = mappingReportReturn.previousSearch;
+    mappingReportReturn = null;
+    $('#mappingReportReturn').hide();
+    $('#mappingReportHint').text('');
+    if (restoreSearch) {
+      setDevicesTableSearch(prevSearch);
+    }
+  }
+
+  function openReportMapping(row) {
+    if (!currentBatchReport || currentBatchReport.batch.id !== currentReportId || currentBatchReport.active || reportHasError || reportRequestPending) return;
+    var mac = rowMac(row);
+    var prevSearch = mappingReportReturn ? mappingReportReturn.previousSearch : getDevicesTableSearch();
+    mappingReportReturn = {
+      id: currentReportId,
+      mac: mac,
+      previousSearch: prevSearch
+    };
+    $('#mappingReportHint').html('Reviewing mapping for <strong>Ext ' + diagnosticsEsc(row.extension || 'Unassigned') + '</strong> · <code>' + diagnosticsEsc(row.mac || mac) + '</code>. Existing checkbox selections are preserved; saving a mapping does not automatically retry delivery.');
+    $('#mappingReportReturn').show();
+    navigatingToMappingFromReport = true;
+    $('a[href="#devices"]').tab('show');
+    navigatingToMappingFromReport = false;
+    setDevicesTableSearch(mac);
+  }
+
+  function openReportDiscovery(mac) {
+    if (!currentBatchReport || currentBatchReport.batch.id !== currentReportId || currentBatchReport.active || reportHasError || reportRequestPending) return;
+    var rows = reportDiscoveryRows(currentBatchReport).filter(function (row) { return !mac || rowMac(row) === mac; });
+    if (rows.length) openDeviceDiscovery(rows.map(rowMac), currentReportId);
+  }
+
+  function updateReportRecoveryPanel() {
+    var report = currentBatchReport;
+    if (!report || report.batch.id !== currentReportId || reportHasError) {
+      $('#batchReportRecovery').hide().empty().data('content',''); return;
+    }
+    var rows = reportDiscoveryRows(report);
+    var attention = (report.items || []).filter(function (row) { return reportOutcomeGroup(row.outcome) === 'attention'; });
+    if (!attention.length || report.batch.kind !== 'push') { $('#batchReportRecovery').hide().empty().data('content',''); return; }
+    var html;
+    if (rows.length) {
+      var scope = rows.slice(0,8).map(function (row) { return 'Ext ' + (row.extension || 'unassigned') + ' · ' + rowMac(row); }).join('; ');
+      html = '<h5><strong>Next step: discover ' + rows.length + ' ' + pluralWord(rows.length,'phone') + '</strong></h5>'
+        + '<p>This attempt did not have a confirmed handset MAC/IP target. This is a safety block, not proof that the phone is offline.</p>'
+        + '<button type="button" class="btn btn-info" id="batchReportDiscoverBtn"' + (report.active ? ' disabled' : '') + '><i class="fa fa-search"></i> Open Device Discovery (' + rows.length + ')</button>'
+        + '<details class="bulk-report-recovery-help"><summary>How to identify these phones and push again</summary>'
+        + '<ol><li>Open Device Discovery and scan the <strong>phones\' subnet</strong>, not the PBX subnet.</li>'
+        + '<li>Use <strong>Identify MAC</strong> for unknown SIP responders. Do not add duplicate mappings for phones already mapped.</li>'
+        + '<li>Return to <strong>Phone Status</strong>, select the listed MACs, and start a new push. Required swap partners are included automatically.</li></ol>'
+        + '<p><small>Handset-identification evidence expires after 15 minutes when matching registration evidence is unavailable. This saved report will retain the original blocked result.</small></p>'
+        + '<p class="bulk-report-meta">' + diagnosticsEsc(scope) + (rows.length > 8 ? ' · +' + (rows.length-8) + ' more; see the phone list.' : '') + '</p>'
+        + '<p><small>Actions use the listed phones across the full report; search and filters do not change this scope. No scan, identification, or push starts automatically.</small></p></details>';
+      var retryCount = (report.retry_macs || []).length;
+      if (retryCount) html += reportRetryNeedsReview(report)
+        ? '<p>Other eligible attempts have uncertain delivery. Inspect Diagnostics before using <strong>Review &amp; Retry Eligible Phones</strong>. Discovery-blocked phones are not included.</p>'
+        : '<p>The other ' + retryCount + ' eligible ' + pluralWord(retryCount,'phone') + ' can be retried separately using <strong>Retry Delivery Failures</strong>. Discovery-blocked phones are not included.</p>';
+    } else {
+      var lookup = attention.some(function (row) { return ['find','search_range'].indexOf(reportPhoneRecoveryAction(row)) !== -1; });
+      html = lookup ? '<h5><strong>Automatic identity lookup needs attention</strong></h5><p>Read the reason beside each phone below. If no range was known, use <strong>Set Search Range</strong>, save an approved CIDR range, and return to this report. Then use <strong>Try Finding Again</strong> (or Retry Eligible Phones for a mixed batch). No subnet is guessed and no uncertain configuration delivery is automatically repeated.</p>'
+        : '<h5><strong>Next step: review the affected phones</strong></h5><p>Use each phone\'s action below: review changed/unassigned mappings, inspect Diagnostics for identity conflicts or uncertain delivery, or retry eligible delivery failures. Do not blindly resend an uncertain push.</p>';
+    }
+    if (report.active) html += '<p><strong>This rollout is still active. Wait for the saved report to finish before taking recovery actions.</strong></p>';
+    if ($('#batchReportRecovery').data('content') !== html) $('#batchReportRecovery').html(html).data('content',html);
+    $('#batchReportRecovery').show();
+    $('#batchReportDiscoverBtn').off('click').on('click',function () { openReportDiscovery(); });
   }
 
   function reportOutcomeGroup(outcome) {
     if (outcome === 'verified' || outcome === 'imported') return 'completed';
-    if (outcome === 'running' || outcome === 'verifying') return 'progress';
+    if (outcome === 'queued' || outcome === 'running' || outcome === 'verifying') return 'progress';
     return 'attention';
   }
 
@@ -1526,8 +1982,393 @@ $(document).ready(function () {
     return !!window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
   }
 
-  function reportSummaryItem(count, label) {
-    return '<span class="provisioner-summary-card"><strong>' + (Number(count) || 0) + '</strong><small>' + diagnosticsEsc(label) + '</small></span>';
+  function reportSummaryItem(count, label, filter, variant) {
+    if (!filter) {
+      return '<span class="provisioner-summary-card"><strong>' + (Number(count) || 0) + '</strong><small>' + diagnosticsEsc(label) + '</small></span>';
+    }
+    var active = reportFilterActive === filter;
+    var classes = 'provisioner-summary-card is-filter' + (variant ? ' summary-' + variant : '') + (active ? ' is-active' : '');
+    return '<button type="button" class="' + classes + ' batch-summary-filter" data-filter="' + diagnosticsEsc(filter) + '" aria-pressed="' + (active ? 'true' : 'false') + '">'
+      + '<strong>' + (Number(count) || 0) + '</strong><small>' + diagnosticsEsc(label) + '</small></button>';
+  }
+
+  function syncReportSummaryFilters() {
+    ['all', 'completed', 'progress', 'attention'].forEach(function (filterKey) {
+      var active = reportFilterActive === filterKey;
+      $('#batchReportSummary .batch-summary-filter[data-filter="' + filterKey + '"]')
+        .toggleClass('is-active', active).attr('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function setBatchReportView(view) {
+    reportViewActive = view === 'phones' ? 'phones' : 'overview';
+    var isPhones = reportViewActive === 'phones';
+    $('#batchReportOverviewTab').toggleClass('active', !isPhones).attr('aria-selected', !isPhones ? 'true' : 'false');
+    $('#batchReportPhonesTab').toggleClass('active', isPhones).attr('aria-selected', isPhones ? 'true' : 'false');
+    $('#batchReportOverviewView').toggle(!isPhones);
+    $('#batchReportPhonesView').toggle(isPhones);
+  }
+
+  function setReportStageFilter(stageKey, label) {
+    reportStageFilter = stageKey || '';
+    reportStageFilterLabel = label || '';
+    $('#batchReportStageFilterText').text(reportStageFilterLabel ? 'Filter: ' + reportStageFilterLabel : '');
+    $('#batchReportStageFilterChip').toggle(!!reportStageFilter);
+  }
+
+  function classifyPhoneStage(row, stageKey) {
+    var idInfo = identityStageInfo(row);
+    var gen = stageState('generation', row.generation);
+    var trig = stageState('trigger', row.trigger);
+    var deliv = stageState('delivery', row.delivery);
+    var verif = stageState('verification', row.verification);
+    var group = reportOutcomeGroup(row.outcome);
+    if (stageKey === 'identity') {
+      if (idInfo.done) return 'done';
+      if (idInfo.unrecorded) return 'not_recorded';
+      if (idInfo.active) return 'active';
+      if (idInfo.failed) return 'attention';
+      return 'not_started';
+    }
+    if (stageKey === 'generation') {
+      if (gen.done) return 'done';
+      if (!idInfo.done && !idInfo.unrecorded) return 'not_started';
+      if (gen.failed || group === 'attention') return 'attention';
+      if (gen.active || group === 'progress') return 'active';
+      return 'not_started';
+    }
+    if (stageKey === 'trigger') {
+      if (trig.done) return 'done';
+      if (!gen.done) return 'not_started';
+      if (trig.failed || group === 'attention') return 'attention';
+      if (trig.active || group === 'progress') return 'active';
+      return 'not_started';
+    }
+    if (stageKey === 'delivery') {
+      if (deliv.done) return 'done';
+      if (!trig.done) return 'not_started';
+      if (deliv.failed || group === 'attention') return 'attention';
+      if (deliv.active || group === 'progress') return 'active';
+      return 'not_started';
+    }
+    if (stageKey === 'verification') {
+      if (verif.done) return 'done';
+      if (!deliv.done) return 'not_started';
+      if (verif.failed || group === 'attention') return 'attention';
+      if (verif.active || group === 'progress') return 'active';
+      return 'not_started';
+    }
+    return 'not_started';
+  }
+
+  function reportIpBucketKey(row) {
+    var ip = String(row.report_ip || '').trim();
+    var parts = ip.split('.');
+    return parts.length === 4 ? (parts[0] + '.' + parts[1] + '.' + parts[2] + '.') : '__none__';
+  }
+
+  function rowMatchesReportStage(row) {
+    if (!reportStageFilter) return true;
+    if (reportStageFilter.indexOf('outcome:') === 0) {
+      return (row.outcome_label + '||' + reportNormalizedOutcomeReason(row)) === reportStageFilter.slice(8);
+    }
+    if (reportStageFilter.indexOf('action:') === 0) {
+      return String(row.action || 'unchanged') === reportStageFilter.slice(7);
+    }
+    if (reportStageFilter.indexOf('brand:') === 0) {
+      return (String(row.brand || '').toLowerCase() || '__none__') === reportStageFilter.slice(6);
+    }
+    if (reportStageFilter.indexOf('source:') === 0) {
+      return (String(row.target_source || '').toLowerCase() || '__none__') === reportStageFilter.slice(7);
+    }
+    if (reportStageFilter.indexOf('ip_group:') === 0) {
+      return reportIpBucketKey(row) === reportStageFilter.slice(9);
+    }
+    if (reportStageFilter.indexOf('stage_issue:') === 0) {
+      var stIssue = classifyPhoneStage(row, reportStageFilter.slice(12));
+      return stIssue === 'attention' || stIssue === 'active';
+    }
+    if (reportStageFilter.indexOf('stage_done:') === 0) {
+      return classifyPhoneStage(row, reportStageFilter.slice(11)) === 'done';
+    }
+    if (reportStageFilter.indexOf('stage_not_started:') === 0) {
+      return classifyPhoneStage(row, reportStageFilter.slice(18)) === 'not_started';
+    }
+    if (reportStageFilter.indexOf('stage_not_recorded:') === 0) {
+      return classifyPhoneStage(row, reportStageFilter.slice(19)) === 'not_recorded';
+    }
+    return true;
+  }
+
+  function reportRowSummaryReason(row) {
+    var action = reportPhoneRecoveryAction(row);
+    if (action === 'search_range') return 'No known phone IP or approved automatic search range was available.';
+    if (action === 'find') return row.identity_message || row.error || 'Automatic handset identity lookup did not complete.';
+    if (action === 'discovery') return 'No confirmed MAC/IP target was available for this handset.';
+    if (action === 'mapping') return row.mapping_changed ? 'The mapping changed since this attempt. Retrying the old mapping is blocked.' : 'This handset needs a valid extension mapping before pushing.';
+    if (action === 'diagnostics') return row.superseded_by_push ? 'A newer push replaced this attempt.' : row.retry_requires_review ? 'Delivery is uncertain; this handset may already have received its config.' : (row.error || 'Handset identity or verification needs review.');
+    if (row.outcome === 'verified') return 'Registration, handset MAC, and final IP matched.';
+    if (row.outcome === 'imported') return 'Mapping saved. No configuration was pushed by this import.';
+    if (reportOutcomeGroup(row.outcome) === 'progress') {
+      return row.outcome === 'queued' ? 'Saved; waiting for the background scheduler.'
+        : row.trigger !== 'accepted' && row.identity_message ? row.identity_message
+        : row.delivery === 'downloaded' ? 'Config downloaded; automatic verification is in progress.' : 'The background worker is processing this phone.';
+    }
+    return row.error || 'Needs review.';
+  }
+
+  function reportNormalizedOutcomeReason(row) {
+    var raw = reportRowSummaryReason(row);
+    return String(raw || '')
+      .replace(/Expected MAC [0-9a-f:-]+ but (?:\d{1,3}\.){3}\d{1,3} identified as [0-9a-f:-]+\./gi, 'The target IP identified as a different handset MAC.')
+      .replace(/The handset at (?:\d{1,3}\.){3}\d{1,3} reported a different MAC\./gi, 'The target IP reported a different handset MAC.')
+      .replace(/\bat (?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/gi, 'at the target IP')
+      .replace(/\bfrom (?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/gi, 'from the target IP')
+      .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g, 'target IP')
+      .replace(/\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b|\b[0-9a-f]{12}\b/gi, 'handset MAC');
+  }
+
+  function renderBatchReportOverview(res, rows, counts) {
+    var total = rows.length;
+    var pct = function (val) { return total ? Math.round((val / total) * 100) : 0; };
+    var funnelHtml = '';
+    if (res.batch.kind === 'import') {
+      var importStages = [
+        {key: 'new', step: '1. New Mappings', count: rows.filter(function (r) { return r.action === 'new'; }).length, tone: 'is-done'},
+        {key: 'update', step: '2. Updated Mappings', count: rows.filter(function (r) { return r.action === 'update'; }).length, tone: 'is-active'},
+        {key: 'unchanged', step: '3. Unchanged', count: rows.filter(function (r) { return !r.action || r.action === 'unchanged'; }).length, tone: ''},
+        {key: 'all', step: '4. Total Saved', count: counts.completed, tone: 'is-done'}
+      ];
+      funnelHtml = '<div class="bulk-overview-section-title"><span>Import Summary Funnel</span><small>Click any stage to inspect matching phones</small></div>'
+        + '<div class="bulk-overview-funnel">' + importStages.map(function (st) {
+          var p = pct(st.count);
+          return '<button type="button" class="bulk-funnel-card ' + st.tone + ' bulk-overview-stage-jump" data-stage-token="' + diagnosticsEsc(st.key === 'all' ? '' : ('action:' + st.key)) + '" data-stage-label="' + diagnosticsEsc(st.step) + '">'
+            + '<div class="bulk-funnel-head"><span class="bulk-funnel-step">' + diagnosticsEsc(st.step) + '</span><span class="bulk-funnel-pct">' + p + '%</span></div>'
+            + '<div class="bulk-funnel-count">' + st.count + '<small>/ ' + total + '</small></div>'
+            + '<div class="bulk-funnel-bar"><span class="bar-done" style="width:' + p + '%"></span></div>'
+            + '<div class="bulk-funnel-meta"><span class="is-done">' + st.count + ' ' + pluralWord(st.count, 'phone') + '</span></div>'
+            + '</button>';
+        }).join('') + '</div>';
+    } else {
+      var stageDefs = [
+        {key: 'identity', step: '1. Target & Identity', doneLabel: 'confirmed'},
+        {key: 'generation', step: '2. Config Generation', doneLabel: 'ready'},
+        {key: 'trigger', step: '3. SIP Trigger', doneLabel: 'accepted'},
+        {key: 'delivery', step: '4. Config Download', doneLabel: 'downloaded'},
+        {key: 'verification', step: '5. Verification', doneLabel: 'verified'}
+      ];
+      funnelHtml = '<div class="bulk-overview-section-title"><span>Rollout progress</span><small>Click any stage to inspect phones at that step</small></div>'
+        + '<div class="bulk-overview-funnel">' + stageDefs.map(function (def) {
+          var doneCount = 0, activeCount = 0, failedCount = 0, notStartedCount = 0, notRecordedCount = 0;
+          rows.forEach(function (row) {
+            var st = classifyPhoneStage(row, def.key);
+            if (st === 'done') doneCount++;
+            else if (st === 'active') activeCount++;
+            else if (st === 'attention') failedCount++;
+            else if (st === 'not_recorded') notRecordedCount++;
+            else notStartedCount++;
+          });
+          var donePct = pct(doneCount);
+          var activePct = pct(activeCount);
+          var failedPct = pct(failedCount);
+          var cardTone = failedCount > 0 ? 'is-failed' : (activeCount > 0 ? 'is-active' : (doneCount > 0 ? 'is-done' : ''));
+          var hasIssueOrActive = (failedCount + activeCount) > 0;
+          var stageToken = hasIssueOrActive ? ('stage_issue:' + def.key) : (doneCount > 0 ? ('stage_done:' + def.key) : (notRecordedCount > 0 ? ('stage_not_recorded:' + def.key) : ('stage_not_started:' + def.key)));
+          var stageChipLabel = def.step + (hasIssueOrActive ? ' (active / attention: ' + (failedCount + activeCount) + ')' : (doneCount > 0 ? ' (completed: ' + doneCount + ')' : (notRecordedCount > 0 ? ' (not recorded: ' + notRecordedCount + ')' : ' (not reached: ' + notStartedCount + ')')));
+          return '<button type="button" class="bulk-funnel-card ' + cardTone + ' bulk-overview-stage-jump" data-stage-token="' + diagnosticsEsc(stageToken) + '" data-stage-label="' + diagnosticsEsc(stageChipLabel) + '">'
+            + '<div class="bulk-funnel-head"><span class="bulk-funnel-step">' + diagnosticsEsc(def.step) + '</span><span class="bulk-funnel-pct">' + donePct + '%</span></div>'
+            + '<div class="bulk-funnel-count">' + doneCount + '<small>/ ' + total + ' ' + diagnosticsEsc(def.doneLabel) + '</small></div>'
+            + '<div class="bulk-funnel-bar">'
+            + (donePct ? '<span class="bar-done" style="width:' + donePct + '%"></span>' : '')
+            + (activePct ? '<span class="bar-active" style="width:' + activePct + '%"></span>' : '')
+            + (failedPct ? '<span class="bar-failed" style="width:' + failedPct + '%"></span>' : '')
+            + '</div>'
+            + '<div class="bulk-funnel-meta">'
+            + '<span class="is-done">' + doneCount + ' done</span>'
+            + (activeCount ? '<span class="is-active">' + activeCount + ' active</span>' : '')
+            + (failedCount ? '<span class="is-failed">' + failedCount + ' attention</span>' : '')
+            + (notRecordedCount ? '<span class="is-muted">' + notRecordedCount + ' not recorded</span>' : '')
+            + (notStartedCount ? '<span class="is-muted">' + notStartedCount + ' not reached</span>' : '')
+            + '</div>'
+            + '</button>';
+        }).join('') + '</div>';
+    }
+
+    var outcomeGroupsMap = {};
+    rows.forEach(function (row) {
+      var label = row.outcome_label || 'Unknown';
+      var rawReason = reportRowSummaryReason(row);
+      var normReason = reportNormalizedOutcomeReason(row);
+      var key = label + '||' + normReason;
+      var group = reportOutcomeGroup(row.outcome);
+      if (!outcomeGroupsMap[key]) {
+        outcomeGroupsMap[key] = {
+          key: key,
+          label: label,
+          group: group,
+          reason: normReason,
+          firstRawReason: rawReason,
+          count: 0,
+          extensions: []
+        };
+      }
+      outcomeGroupsMap[key].count++;
+      if (outcomeGroupsMap[key].extensions.length < 6) {
+        outcomeGroupsMap[key].extensions.push(String(row.extension || 'Unassigned'));
+      }
+    });
+    var groupRank = {attention: 0, progress: 1, completed: 2};
+    var outcomeGroups = Object.keys(outcomeGroupsMap).map(function (k) { return outcomeGroupsMap[k]; }).sort(function (a, b) {
+      if (groupRank[a.group] !== groupRank[b.group]) return groupRank[a.group] - groupRank[b.group];
+      return b.count - a.count;
+    });
+
+    var outcomesHtml = outcomeGroups.length ? '<ul class="bulk-overview-list">' + outcomeGroups.map(function (item) {
+      var pillTone = item.group === 'completed' ? 'complete' : (item.group === 'progress' ? 'in-progress' : 'attention');
+      var displayReason = item.count === 1 ? item.firstRawReason : item.reason;
+      var showSamples = item.group === 'attention' && item.count > 0 && item.count <= 5;
+      var sampleText = showSamples ? ('Extensions: ' + item.extensions.join(', ')) : '';
+      return '<li class="bulk-overview-item is-' + item.group + '">'
+        + '<div class="bulk-overview-item-body">'
+        + '<div class="bulk-overview-item-title"><span class="bulk-status ' + pillTone + '">' + diagnosticsEsc(item.label) + '</span></div>'
+        + '<span class="bulk-overview-item-desc">' + diagnosticsEsc(displayReason) + '</span>'
+        + (sampleText ? '<span class="bulk-overview-item-samples">' + diagnosticsEsc(sampleText) + '</span>' : '')
+        + '</div>'
+        + '<div class="bulk-overview-item-actions">'
+        + '<strong>' + item.count + ' ' + pluralWord(item.count, 'phone') + '</strong>'
+        + '<button type="button" class="btn btn-default btn-xs bulk-overview-token-jump" data-filter="' + diagnosticsEsc(item.group) + '" data-token="' + diagnosticsEsc('outcome:' + item.key) + '" data-label="' + diagnosticsEsc(item.label + ' (' + item.count + ')') + '">View Phones <i class="fa fa-angle-right"></i></button>'
+        + '</div>'
+        + '</li>';
+    }).join('') + '</ul>' : '<p class="text-muted">No phone records in this report.</p>';
+
+    var latestTime = '';
+    rows.forEach(function (row) {
+      ['verification_at', 'delivery_at', 'trigger_at', 'generation_at', 'attempt_at'].forEach(function (field) {
+        if (row[field] && (!latestTime || String(row[field]) > latestTime)) latestTime = String(row[field]);
+      });
+    });
+    var waveStatusText = readableBatchStatus(res.batch.status);
+    if (res.rollout && res.active) {
+      waveStatusText += ' · Wave ' + (Number(res.rollout.cursor) + 1) + (res.rollout.status === 'queued' ? ' (Waiting for scheduler)' : ' (Worker active)');
+    }
+    var retryEligibleCount = (res.retry_macs || []).length;
+    var discoveryNeededCount = reportDiscoveryRows(res).length;
+    var recoverySummary = retryEligibleCount
+      ? retryEligibleCount + ' retryable' + (discoveryNeededCount ? ' · ' + discoveryNeededCount + ' need discovery' : '')
+      : (discoveryNeededCount ? discoveryNeededCount + ' need discovery' : (counts.attention ? counts.attention + ' need review' : 'No recovery needed'));
+
+    var brandMap = {};
+    var sourceMap = {};
+    var ipBucketMap = {};
+    rows.forEach(function (row) {
+      var bKey = String(row.brand || '').toLowerCase() || '__none__';
+      var bName = readableReportBrand(row.brand) || 'Unspecified';
+      if (!brandMap[bKey]) brandMap[bKey] = {key: bKey, name: bName, total: 0, completed: 0, progress: 0, attention: 0};
+      brandMap[bKey].total++;
+      brandMap[bKey][reportOutcomeGroup(row.outcome)]++;
+
+      var sKey = String(row.target_source || '').toLowerCase() || '__none__';
+      var sName = row.target_source ? readableReportSource(row.target_source) : (reportPhoneRecoveryAction(row) === 'discovery' ? 'No confirmed target' : 'Not recorded');
+      if (!sourceMap[sKey]) sourceMap[sKey] = {key: sKey, name: sName, total: 0, completed: 0, attention: 0};
+      sourceMap[sKey].total++;
+      if (reportOutcomeGroup(row.outcome) === 'completed') sourceMap[sKey].completed++;
+      if (reportOutcomeGroup(row.outcome) === 'attention') sourceMap[sKey].attention++;
+
+      var bucketKey = reportIpBucketKey(row);
+      var bucketName = bucketKey === '__none__' ? 'No confirmed IP' : (bucketKey + 'x (/24)');
+      if (!ipBucketMap[bucketKey]) ipBucketMap[bucketKey] = {key: bucketKey, name: bucketName, total: 0, completed: 0, attention: 0};
+      ipBucketMap[bucketKey].total++;
+      if (reportOutcomeGroup(row.outcome) === 'completed') ipBucketMap[bucketKey].completed++;
+      if (reportOutcomeGroup(row.outcome) === 'attention') ipBucketMap[bucketKey].attention++;
+    });
+
+    var brandRowsHtml = Object.keys(brandMap).map(function (k) {
+      var b = brandMap[k];
+      return '<tr>'
+        + '<td><strong>' + diagnosticsEsc(b.name) + '</strong></td>'
+        + '<td>' + b.total + '</td>'
+        + '<td class="text-success">' + b.completed + '</td>'
+        + '<td class="text-danger">' + b.attention + '</td>'
+        + '<td class="text-right"><button type="button" class="btn btn-default btn-xs bulk-overview-token-jump" data-filter="all" data-token="' + diagnosticsEsc('brand:' + b.key) + '" data-label="' + diagnosticsEsc('Brand: ' + b.name) + '">View</button></td>'
+        + '</tr>';
+    }).join('');
+
+    var sourceRowsHtml = Object.keys(sourceMap).map(function (k) {
+      var s = sourceMap[k];
+      return '<tr>'
+        + '<td>' + diagnosticsEsc(s.name) + '</td>'
+        + '<td>' + s.total + '</td>'
+        + '<td class="text-success">' + s.completed + '</td>'
+        + '<td class="text-danger">' + s.attention + '</td>'
+        + '<td class="text-right"><button type="button" class="btn btn-default btn-xs bulk-overview-token-jump" data-filter="all" data-token="' + diagnosticsEsc('source:' + s.key) + '" data-label="' + diagnosticsEsc('Source: ' + s.name) + '">View</button></td>'
+        + '</tr>';
+    }).join('');
+
+    var ipBucketRowsHtml = Object.keys(ipBucketMap).map(function (k) {
+      var b = ipBucketMap[k];
+      return '<tr>'
+        + '<td><code>' + diagnosticsEsc(b.name) + '</code></td>'
+        + '<td>' + b.total + '</td>'
+        + '<td class="text-success">' + b.completed + '</td>'
+        + '<td class="text-danger">' + b.attention + '</td>'
+        + '<td class="text-right"><button type="button" class="btn btn-default btn-xs bulk-overview-token-jump" data-filter="all" data-token="' + diagnosticsEsc('ip_group:' + b.key) + '" data-label="' + diagnosticsEsc('IP group: ' + b.name) + '">View</button></td>'
+        + '</tr>';
+    }).join('');
+
+    var completedColHeader = res.batch.kind === 'import' ? 'Mappings saved' : 'Verified';
+    var html = funnelHtml
+      + '<div class="bulk-overview-grid">'
+      + '<div class="bulk-overview-card">'
+      + '<h5><span>Outcome &amp; Attention Breakdown</span><small>' + outcomeGroups.length + ' ' + pluralWord(outcomeGroups.length, 'group') + '</small></h5>'
+      + outcomesHtml
+      + '</div>'
+      + '<div class="bulk-overview-card">'
+      + '<h5><span>Rollout Execution &amp; Scope</span><small>' + total + ' ' + pluralWord(total, 'phone') + '</small></h5>'
+      + '<div class="bulk-overview-kv">'
+      + '<div class="bulk-overview-kv-item"><small>Batch Status</small><strong>' + diagnosticsEsc(waveStatusText) + '</strong></div>'
+      + '<div class="bulk-overview-kv-item"><small>Completion Rate</small><strong>' + pct(counts.completed) + '% (' + counts.completed + ' / ' + total + ')</strong></div>'
+      + '<div class="bulk-overview-kv-item"><small>Latest Activity</small><strong>' + diagnosticsEsc(latestTime ? readableBatchTimestamp(latestTime) : readableBatchDate(res.batch.created_at)) + '</strong></div>'
+      + '<div class="bulk-overview-kv-item"><small>Recovery Scope</small><strong>' + diagnosticsEsc(recoverySummary) + '</strong></div>'
+      + '</div>'
+      + '<div class="bulk-overview-section-title"><span>By Brand</span></div>'
+      + '<table class="bulk-overview-subtable"><thead><tr><th>Brand</th><th>Total</th><th>' + diagnosticsEsc(completedColHeader) + '</th><th>Attention</th><th></th></tr></thead><tbody>' + brandRowsHtml + '</tbody></table>'
+      + '<div class="bulk-overview-section-title" style="margin-top:10px;"><span>By Target Source</span></div>'
+      + '<table class="bulk-overview-subtable"><thead><tr><th>Source</th><th>Total</th><th>' + diagnosticsEsc(completedColHeader) + '</th><th>Attention</th><th></th></tr></thead><tbody>' + sourceRowsHtml + '</tbody></table>'
+      + '<div class="bulk-overview-section-title" style="margin-top:10px;"><span>By IP Group (/24 buckets)</span></div>'
+      + '<table class="bulk-overview-subtable"><thead><tr><th>IP group (/24)</th><th>Total</th><th>' + diagnosticsEsc(completedColHeader) + '</th><th>Attention</th><th></th></tr></thead><tbody>' + ipBucketRowsHtml + '</tbody></table>'
+      + '</div>'
+      + '</div>';
+
+    $('#batchReportOverview').html(html);
+    $('#batchReportOverview .bulk-overview-stage-jump').off('click').on('click', function () {
+      var stageToken = String($(this).data('stage-token') || '');
+      var stageLabel = String($(this).data('stage-label') || '');
+      reportFilterActive = 'all';
+      $('#batchReportFilter').val('all');
+      syncReportSummaryFilters();
+      setReportStageFilter(stageToken, stageToken ? stageLabel : '');
+      setBatchReportView('phones');
+      if (reportTableReady) {
+        $('#batchReportTable').bootstrapTable('resetSearch', '');
+        $('#batchReportTable').bootstrapTable('filterBy', {});
+        $('#batchReportTable').bootstrapTable('selectPage', 1);
+      }
+    });
+    $('#batchReportOverview .bulk-overview-token-jump').off('click').on('click', function () {
+      var filterGroup = String($(this).data('filter') || 'all');
+      var token = String($(this).data('token') || '');
+      var label = String($(this).data('label') || '');
+      reportFilterActive = filterGroup;
+      $('#batchReportFilter').val(filterGroup);
+      syncReportSummaryFilters();
+      setReportStageFilter(token, label);
+      setBatchReportView('phones');
+      if (reportTableReady) {
+        $('#batchReportTable').bootstrapTable('resetSearch', '');
+        $('#batchReportTable').bootstrapTable('filterBy', {});
+        $('#batchReportTable').bootstrapTable('selectPage', 1);
+      }
+    });
   }
 
   function setReportMessage(prefix, message, error) {
@@ -1544,34 +2385,74 @@ $(document).ready(function () {
       .attr('title', batchRetryBusy ? 'Starting a retry batch…' : report && report.active ? 'Wait for this batch to finish before retrying.'
         : reportHasError ? 'Refresh the report to check its current state before retrying.'
           : count ? 'Retry all ' + count + ' eligible ' + pluralWord(count, 'phone') + ' in this batch, including required swap partners. Search and filters do not change this scope.'
-            : 'No eligible phones in this batch. Changed mappings require a new push.');
+            : reportDiscoveryRows(report).length ? 'Discovery is required. Use Open Device Discovery, then start a new push from Phone Status.'
+              : 'No eligible phones in this batch. Review mapping changes and diagnostic guidance before starting a new push.');
+    $('#retryBatchLabel').text(reportRetryNeedsReview(report) ? 'Review & Retry Eligible Phones' : reportRetryIsFinding(report) ? 'Try Finding Again' : reportDiscoveryRows(report).length && count ? 'Retry Delivery Failures' : 'Retry Eligible Phones');
     $('#retryBatchCount').text(count);
   }
 
   function reportPhoneDetails(index, row) {
-    var progress = row.report_kind === 'import' ? '<span class="batch-stage done"><i class="fa fa-check-circle"></i> Mapping saved</span>'
-      : '<div class="batch-stage-list">' + stageView('generation', row.generation) + '<i class="fa fa-angle-right text-muted"></i>'
-        + stageView('trigger', row.trigger) + '<i class="fa fa-angle-right text-muted"></i>'
-        + stageView('delivery', row.delivery) + '<i class="fa fa-angle-right text-muted"></i>'
-        + stageView('verification', row.verification) + '</div>';
+    var group = reportOutcomeGroup(row.outcome);
+    var detailTone = group === 'attention' ? ' is-attention' : (group === 'progress' ? ' is-progress' : '');
+    var conclusionTone = group === 'completed' ? 'success' : (group === 'progress' ? 'warning' : 'danger');
     var nextStep = row.error || (row.outcome === 'verified' ? 'No action needed.'
       : row.outcome === 'imported' ? 'Review this phone in MAC Mapping. Use Push Imported Phones from the saved import to deliver its configuration.'
-        : reportOutcomeGroup(row.outcome) === 'progress' ? 'Waiting for the phone and background verification.'
+        : group === 'progress' ? 'Waiting for the phone and background verification.'
           : row.retryable ? 'This phone is eligible for a retry using its current mapping and fresh target checks.'
-            : 'Review the reason and current MAC mapping before starting a new push.');
-    var fields = [['Target source', row.target_source || 'Not recorded'], ['Target IP', row.target_ip || '—'],
-      ['Download IP', row.fetch_ip || '—'], ['Verification IP', row.verify_ip || '—']];
-    var times = [['Attempt', row.attempt_at], ['Config generated', row.generation_at], ['Trigger', row.trigger_at],
-      ['Download', row.delivery_at], ['Verification', row.verification_at]];
-    var detailList = function (values) {
-      return '<dl>' + values.map(function (field) { return '<dt>' + field[0] + '</dt><dd>' + diagnosticsEsc(field[1] || '—') + '</dd>'; }).join('') + '</dl>';
+             : 'Review the reason and current MAC mapping before starting a new push.');
+    if (row.retry_requires_review) nextStep += ' Delivery may already have occurred. Inspect the handset before explicitly requesting a retry.';
+    if (row.next_action === 'discovery') nextStep += ' Open Device Discovery and identify this handset before starting a new push.';
+
+    var stageCard = function (stepTitle, stageKey, value, ipLabel, ipValue, timestamp, extraMetaLabel, extraMetaValue) {
+      var state = stageState(stageKey, value, row);
+      var cardTone = state.done ? ' is-done' : (state.failed ? ' is-failed' : (state.active ? ' is-active' : ''));
+      return '<div class="bulk-report-stage-card' + cardTone + '">'
+        + '<span class="bulk-report-stage-step">' + diagnosticsEsc(stepTitle) + '</span>'
+        + stageView(stageKey, value, row)
+        + (ipLabel ? '<span class="bulk-report-stage-meta">' + diagnosticsEsc(ipLabel) + ': ' + (ipValue ? '<code>' + diagnosticsEsc(ipValue) + '</code>' : '—') + '</span>' : '')
+        + (extraMetaLabel ? '<span class="bulk-report-stage-meta">' + diagnosticsEsc(extraMetaLabel) + ': ' + diagnosticsEsc(extraMetaValue || '—') + '</span>' : '')
+        + '<span class="bulk-report-stage-meta">Time: ' + diagnosticsEsc(readableBatchTimestamp(timestamp)) + '</span>'
+        + '</div>';
     };
-    return '<div class="bulk-report-detail"><h5>Phone Details · ' + diagnosticsEsc(row.extension || 'Unassigned') + ' · <code>' + diagnosticsEsc(row.mac) + '</code></h5>'
-      + progress + '<p><strong>Result / next step:</strong> ' + diagnosticsEsc(nextStep) + '</p>'
+
+    var progress = row.report_kind === 'import'
+      ? '<div class="bulk-report-stage-cards"><div class="bulk-report-stage-card is-done"><span class="bulk-report-stage-step">Import Mapping</span><span class="batch-stage done"><i class="fa fa-check-circle"></i> Mapping saved</span><span class="bulk-report-stage-meta">Time: ' + diagnosticsEsc(readableBatchTimestamp(row.attempt_at)) + '</span></div></div>'
+      : '<div class="bulk-report-stage-cards">'
+        + stageCard('1. Target & Identity', 'identity', row.identity_phase, 'Target IP', row.target_ip, row.attempt_at, 'Source', readableReportSource(row.target_source))
+        + stageCard('2. Config Generation', 'generation', row.generation, '', '', row.generation_at)
+        + stageCard('3. SIP Trigger', 'trigger', row.trigger, 'Target IP', row.target_ip, row.trigger_at)
+        + stageCard('4. Config Download', 'delivery', row.delivery, 'Download IP', row.fetch_ip, row.delivery_at)
+        + stageCard('5. Verification', 'verification', row.verification, 'Verify IP', row.verify_ip, row.verification_at)
+        + '</div>';
+
+    var metaItems = [
+      ['Target source', readableReportSource(row.target_source)],
+      ['Attempt started', readableBatchTimestamp(row.attempt_at)]
+    ];
+    if (row.identity_message) metaItems.push(['Identity preflight', row.identity_message]);
+    if (row.local_arp_refresh) {
+      metaItems.push(['Active ARP refresh', row.local_arp_refresh]);
+      metaItems.push(['ARP response MACs', (row.local_arp_macs || []).join(', ') || 'No active response recorded']);
+    }
+    var metaHtml = '<div class="bulk-report-meta-strip">' + metaItems.map(function (item) {
+      return '<span class="bulk-report-meta-item"><strong>' + diagnosticsEsc(item[0]) + ':</strong> ' + diagnosticsEsc(item[1] || '—') + '</span>';
+    }).join('') + '</div>';
+
+    var brandText = row.brand ? ' · ' + diagnosticsEsc(readableReportBrand(row.brand)) : '';
+    return '<div class="bulk-report-detail' + detailTone + '">'
+      + '<div class="bulk-report-detail-header">'
+      + '<h5>Phone Details · ' + diagnosticsEsc(row.extension || 'Unassigned') + brandText + ' · <code>' + diagnosticsEsc(row.mac) + '</code></h5>'
+      + '<button type="button" class="btn btn-default btn-xs diagnostics-btn" data-mac="' + rowMac(row) + '"><i class="fa fa-stethoscope"></i> Diagnostics</button>'
+      + '</div>'
+      + '<div class="diagnostic-conclusion ' + conclusionTone + '">'
+      + '<p><strong>Result / next step:</strong> ' + diagnosticsEsc(nextStep) + '</p>'
       + (row.mapping_changed ? '<p class="text-warning">Mapping changed since this batch; retry is blocked.</p>' : '')
       + (row.superseded_by_push ? '<p class="text-warning">A newer push has superseded this attempt.</p>' : '')
       + (row.action ? '<p><strong>Mapping ' + diagnosticsEsc(row.action) + ':</strong> ' + diagnosticsEsc((row.changes || []).join('; ') || 'No mapping changes') + '</p>' : '')
-      + '<div class="bulk-report-detail-grid"><div><h5>Target Evidence</h5>' + detailList(fields) + '</div><div><h5>Attempt Times</h5>' + detailList(times) + '</div></div></div>';
+      + '</div>'
+      + progress
+      + metaHtml
+      + '</div>';
   }
 
   function reportPhoneSearch(data, text) {
@@ -1579,6 +2460,7 @@ $(document).ready(function () {
     var macQuery = /^[a-f0-9:-]+$/i.test(query) ? query.replace(/[:-]/g, '') : '';
     return data.filter(function (row) {
       return (reportFilterActive === 'all' || reportOutcomeGroup(row.outcome) === reportFilterActive)
+        && rowMatchesReportStage(row)
         && (!query || row.report_search.indexOf(query) !== -1 || (macQuery && rowMac(row).indexOf(macQuery) !== -1));
     });
   }
@@ -1590,6 +2472,8 @@ $(document).ready(function () {
 
   function initReportPhoneTable(rows) {
     if (reportTableReady) {
+      // Remove stale detail-view rows before reload so Bootstrap Table v1.21.0 re-renders expanded details with fresh data.
+      $('#batchReportTable > tbody > tr.detail-view').remove();
       // Loading data into the existing widget preserves search, sort, page size and page number.
       $('#batchReportTable').bootstrapTable('load', {rows: rows, fixedScroll: true});
       return;
@@ -1604,14 +2488,23 @@ $(document).ready(function () {
       formatLoadingMessage: function () { return 'Loading report phones…'; },
       formatNoMatches: function () { return currentBatchReport && !currentBatchReport.items.length ? 'No phones in this report.' : 'No phones match your search or filter.'; },
       columns: [
-        {field: 'extension', title: 'Extension', sortable: true, formatter: function (value) { return diagnosticsEsc(value || 'Unassigned'); }},
+        {field: 'extension', title: 'Extension', sortable: true, formatter: function (value) { return '<strong>' + diagnosticsEsc(value || 'Unassigned') + '</strong>'; }},
         {field: 'mac', title: 'Phone / MAC', sortable: true, class: 'bulk-report-phone', formatter: function (value, row) {
-          return (row.brand ? diagnosticsEsc(row.brand) + '<br>' : '') + '<code>' + diagnosticsEsc(value) + '</code>';
+          return (row.brand ? '<strong>' + diagnosticsEsc(readableReportBrand(row.brand)) + '</strong><br>' : '') + '<code>' + diagnosticsEsc(value) + '</code>';
         }},
-        {field: 'report_ip', title: 'Target IP', sortable: true, sorter: window.ipSorter, class: 'bulk-report-target', formatter: function (value) {
-          return value ? '<code>' + diagnosticsEsc(value) + '</code>' : '<span class="text-muted">Not recorded</span>';
+        {field: 'report_ip', title: 'Target IP', sortable: true, sorter: window.ipSorter, class: 'bulk-report-target', formatter: function (value, row) {
+          if (!value) {
+            return reportPhoneRecoveryAction(row) === 'discovery'
+              ? '<span class="text-warning">Not confirmed</span>' : '<span class="text-muted">Not recorded</span>';
+          }
+          var sourceBadge = row.target_source
+            ? '<br><span class="badge provisioner-configured-mode">' + diagnosticsEsc(readableReportSource(row.target_source)) + '</span>' : '';
+          return '<code>' + diagnosticsEsc(value) + '</code>' + sourceBadge;
         }},
-        {field: 'outcome_label', title: 'Result', sortable: true, formatter: function (value, row) { return batchOutcomeView(row); }},
+        {field: 'outcome_label', title: 'Result', sortable: true, formatter: function (value, row) { return batchOutcomeView(row); },
+          events: {'click .batch-phone-discovery': function (event,value,row) { event.preventDefault(); openReportDiscovery(rowMac(row)); },
+            'click .batch-phone-search-range': function (event) { event.preventDefault(); openReportSearchRange(); },
+            'click .batch-phone-mapping': function (event, value, row) { event.preventDefault(); openReportMapping(row); }}},
         {field: 'details', title: 'Details', searchable: false, formatter: function (value, row) {
           var open = !!expandedReportMacs[row.mac];
           return '<button type="button" class="btn btn-default batch-phone-details" data-mac="' + rowMac(row) + '" aria-expanded="' + open
@@ -1625,8 +2518,11 @@ $(document).ready(function () {
       onCollapseRow: function (index, row) { delete expandedReportMacs[row.mac]; setReportDetailsButton(row.mac, false); },
       onPostBody: function () {
         if (!Object.keys(expandedReportMacs).length) return;
-        ($('#batchReportTable').bootstrapTable('getData', {useCurrentPage: true}) || []).forEach(function (row) {
-          if (expandedReportMacs[row.mac]) $('#batchReportTable').bootstrapTable('expandRowByUniqueId', row.mac);
+        ($('#batchReportTable').bootstrapTable('getData', {useCurrentPage: true}) || []).forEach(function (row, idx) {
+          if (expandedReportMacs[row.mac]) {
+            $('#batchReportTable').bootstrapTable('expandRowByUniqueId', row.mac);
+            $('#batchReportTable > tbody > tr[data-uniqueid="' + rowMac(row) + '"]').next('tr.detail-view').find('td').html(reportPhoneDetails(idx, row));
+          }
         });
       }
     });
@@ -1690,7 +2586,9 @@ $(document).ready(function () {
       },
       columns: [
         {field: 'created_at', title: 'Date', sortable: true, formatter: function (value, row) {
-          return '<span title="Batch ' + diagnosticsEsc(row.id) + '">' + diagnosticsEsc(readableBatchDate(value)) + '</span>';
+          var shortId = row && row.id ? String(row.id).slice(0, 8) : '';
+          return '<span title="Batch ' + diagnosticsEsc(row.id) + '">' + diagnosticsEsc(readableBatchDate(value)) + '</span>'
+            + (shortId ? '<small class="bulk-report-meta"><code>#' + diagnosticsEsc(shortId) + '</code></small>' : '');
         }},
         {field: 'kind', title: 'Type', sortable: true, formatter: function (value) { return value === 'import' ? 'Import' : 'Push'; }},
         {field: 'device_count', title: 'Phones', sortable: true, formatter: function (value, row) {
@@ -1709,17 +2607,24 @@ $(document).ready(function () {
     $('#batchHistoryView .search input').attr('aria-label', 'Search saved batch reports');
   }
 
-  function stopBatchReportPolling() {
+  function stopBatchReportPolling(showPaused) {
     reportPollGeneration++;
     reportRequestPending = false;
     if (reportPollTimer !== null) window.clearTimeout(reportPollTimer);
     reportPollTimer = null;
+    if (showPaused && currentReportId && (!currentBatchReport || currentBatchReport.active)) {
+      renderReportPollStatus('paused');
+    }
   }
 
   function showBatchHistory() {
-    stopBatchReportPolling();
+    activateLogsSection('#bulkReportsSection');
+    stopBatchReportPolling(false);
     currentReportId = '';
     currentBatchReport = null;
+    reportLastCheckedTime = '';
+    renderReportPollStatus('idle');
+    updateReportRecoveryPanel();
     updateReportRetryButton();
     $('#batchReportResults').hide();
     $('#batchHistoryView').show();
@@ -1727,13 +2632,17 @@ $(document).ready(function () {
   }
 
   function showBatchReport(id, navigate) {
-    stopBatchReportPolling();
+    stopBatchReportPolling(false);
     currentReportId = id;
     var generation = reportPollGeneration;
     var differentReport = reportDisplayedId !== id;
     if (differentReport) {
       currentBatchReport = null;
+      reportLastCheckedTime = '';
+      reportPollFailures = 0;
       reportFilterActive = 'all';
+      setReportStageFilter('', '');
+      setBatchReportView('overview');
       expandedReportMacs = {};
       $('#batchReportFilter').val('all');
       $('#batchReportContent').hide();
@@ -1743,44 +2652,77 @@ $(document).ready(function () {
     $('#downloadBatchCsvBtn').prop('disabled', true);
     updateReportRetryButton();
     setReportMessage('batchReport', 'Loading report…', false);
+    renderReportPollStatus('updating');
+    $('#batchReportRecovery').hide().empty().data('content','');
     if (navigate) {
       $('#applyModal').modal('hide');
-      $('a[href="#import"]').tab('show');
-      activateBulkSection('#bulkReportsSection');
+      activateLogsSection('#bulkReportsSection');
+      reportRequestPending = true;
+      $('a[href="#logs"]').tab('show');
     }
     function refresh() {
       reportRequestPending = true;
+      renderReportPollStatus('updating');
       ajax('getBatchReport', {batch_id: id}, function (res) {
         if (generation !== reportPollGeneration || currentReportId !== id) return;
         reportRequestPending = false;
         $('#batchReportResults').attr('aria-busy', 'false');
         if (!res || !res.success) {
           reportHasError = true;
+          renderReportPollStatus('error');
           setReportMessage('batchReport', res && res.error ? res.error : 'Could not load report. Refresh to try again.', true);
+          updateReportRecoveryPanel();
           updateReportRetryButton();
+          if (!currentBatchReport || currentBatchReport.active) {
+            reportPollFailures++;
+            scheduleReportRefresh(refresh, generation, Math.min(30000, 2000 * Math.pow(2, Math.min(reportPollFailures - 1, 4))));
+          }
           return;
         }
         reportHasError = false;
-        setReportMessage('batchReport', '', false);
+        reportPollFailures = 0;
+        reportLastCheckedTime = formatReportCheckTime(new Date());
         currentBatchReport = res;
+        renderReportPollStatus('checked');
+        setReportMessage('batchReport', '', false);
         var counts = {completed:0, progress:0, attention:0};
         var rows = res.items.map(function (row) {
           counts[reportOutcomeGroup(row.outcome)]++;
           return Object.assign({}, row, {
             report_kind: res.batch.kind,
             report_ip: row.target_ip || row.fetch_ip || row.verify_ip || '',
-            outcome_label: readableOutcomeCount(row.outcome),
-            report_search: [row.extension, row.mac, row.brand, row.target_ip, row.fetch_ip, row.verify_ip,
-              row.outcome, readableOutcomeCount(row.outcome), row.error, (row.changes || []).join(' ')].filter(Boolean).join(' ').toLowerCase()
+            outcome_label: reportOutcomeLabel(row),
+            report_search: [row.extension, row.mac, row.brand, readableReportBrand(row.brand), row.target_ip, row.fetch_ip, row.verify_ip,
+              row.target_source, readableReportSource(row.target_source),
+              row.outcome, reportOutcomeLabel(row), row.error, (row.changes || []).join(' ')].filter(Boolean).join(' ').toLowerCase()
           });
         });
         var reportKind = res.batch.kind === 'import' ? 'Import' : 'Push';
         $('#batchReportTitle').text(reportKind + ' Report');
         $('#batchReportMeta').html(diagnosticsEsc(readableBatchDate(res.batch.created_at)) + ' · <code>' + diagnosticsEsc(id) + '</code>');
-        $('#batchReportStatus').text(readableBatchStatus(res.batch.status)).attr('class', 'bulk-status ' + batchStatusClass(res.batch.status));
-        $('#batchReportSummary').html(reportSummaryItem(rows.length, pluralWord(rows.length, 'Phone'))
-          + reportSummaryItem(counts.completed, res.batch.kind === 'import' ? 'Mappings saved' : 'Verified')
-          + reportSummaryItem(counts.progress, 'In progress') + reportSummaryItem(counts.attention, 'Needs attention'));
+        if (res.rollout && res.active) $('#batchReportMeta').append(' · Wave ' + (Number(res.rollout.cursor) + 1)
+          + (res.rollout.status === 'queued' ? ' · Waiting for scheduler' : ' · Worker active')
+          + (res.rollout.status === 'running' && Number(res.rollout.expires) < Date.now()/1000 ? ' · Worker heartbeat overdue; recovery pending (no automatic resend)' : ''));
+        var headerTone = batchStatusClass(res.batch.status);
+        $('#batchReportStatus').text(readableBatchStatus(res.batch.status)).attr('class', 'bulk-status ' + headerTone);
+        $('#batchReportResults .bulk-report-header')
+          .toggleClass('is-attention', headerTone === 'attention')
+          .toggleClass('is-progress', headerTone === 'in-progress');
+        $('#batchReportPhonesCount').text(rows.length);
+        $('#batchReportSummary').html(
+          reportSummaryItem(rows.length, pluralWord(rows.length, 'Phone'), 'all', 'all')
+          + reportSummaryItem(counts.completed, res.batch.kind === 'import' ? 'Mappings saved' : 'Verified', 'completed', 'completed')
+          + reportSummaryItem(counts.progress, 'In progress', 'progress', 'progress')
+          + reportSummaryItem(counts.attention, 'Needs attention', 'attention', 'attention')
+        );
+        ['all', 'completed', 'progress', 'attention'].forEach(function (filterKey) {
+          $('#batchReportSummary .batch-summary-filter[data-filter="' + filterKey + '"]').off('click').on('click', function () {
+            setReportStageFilter('', '');
+            setBatchReportView('phones');
+            $('#batchReportFilter').val(filterKey).trigger('change');
+          });
+        });
+        renderBatchReportOverview(res, rows, counts);
         var links = '';
         if (res.batch.parent_id) links += '<div class="bulk-report-control-group">Retry of <button type="button" class="btn btn-default batch-parent-link" data-id="' + diagnosticsEsc(res.batch.parent_id) + '"><i class="fa fa-file-text-o"></i> View Original Report</button></div>';
         if (res.children && res.children.length) links += '<div class="bulk-report-control-group">' + res.children.map(function (child) {
@@ -1801,21 +2743,52 @@ $(document).ready(function () {
         $('.batch-parent-link').off('click').on('click', function () { showBatchReport(String($(this).data('id')), false); });
         $('.batch-child-link').off('click').on('click', function () { showBatchReport(String($(this).data('id')), false); });
         updateReportRetryButton();
-        if (res.active) reportPollTimer = setTimeout(function () {
-          reportPollTimer = null;
-          if (generation === reportPollGeneration && $('#bulkReportsSection').is(':visible')) refresh();
-        }, 2000);
+        updateReportRecoveryPanel();
+        if (res.active) scheduleReportRefresh(refresh, generation, 2000);
       });
     }
     refresh();
   }
+  $(document).on('visibilitychange.provisionerReports', function () {
+    if (!currentBatchReport || !currentBatchReport.active || !currentReportId) return;
+    if (document.hidden) {
+      stopBatchReportPolling(true);
+    } else if ($('#bulkReportsSection').is(':visible')) {
+      showBatchReport(currentReportId, false);
+    }
+  });
   $('#batchHistoryTab').on('click', showBatchHistory);
   $('#refreshBatchHistoryBtn, #reloadBatchHistoryBtn').on('click', loadBatchHistory);
   $('#backToBatchHistoryBtn').on('click', showBatchHistory);
+  $('#batchReportOverviewTab').on('click', function () { setBatchReportView('overview'); });
+  $('#batchReportPhonesTab').on('click', function () { setBatchReportView('phones'); });
+  $('#clearBatchReportStageFilterBtn').on('click', function () {
+    setReportStageFilter('', '');
+    if (reportTableReady) {
+      $('#batchReportTable').bootstrapTable('filterBy', {});
+      $('#batchReportTable').bootstrapTable('selectPage', 1);
+    }
+  });
   $('#refreshBatchReportBtn, #reloadBatchReportBtn').on('click', function () { if (currentReportId) showBatchReport(currentReportId, false); });
   $('#downloadBatchCsvBtn').on('click', downloadCurrentBatchCsv);
+  $('#returnToDiscoveryReportBtn').on('click',function () {
+    if (discoveryReportReturn) showBatchReport(discoveryReportReturn.id,true);
+  });
+  $('#returnToMappingReportBtn').on('click', function () {
+    if (!mappingReportReturn) return;
+    var reportId = mappingReportReturn.id;
+    clearMappingReportReturn(true);
+    showBatchReport(reportId, true);
+  });
+  $('#discoveryReportPhoneStatusBtn').on('click',function () {
+    if (discoveryReportReturn) $('a[href="#phones"]').tab('show');
+  });
+  $('#pushSearchReturnToReportBtn').on('click',function () { if (searchRangeReportReturn) showBatchReport(searchRangeReportReturn,true); });
   $('#batchReportFilter').on('change', function () {
-    reportFilterActive = $(this).val();
+    reportFilterActive = $(this).val() || 'all';
+    setReportStageFilter('', '');
+    setBatchReportView('phones');
+    syncReportSummaryFilters();
     if (reportTableReady) {
       $('#batchReportTable').bootstrapTable('filterBy', {});
       $('#batchReportTable').bootstrapTable('selectPage', 1);
@@ -1824,7 +2797,8 @@ $(document).ready(function () {
   $('#retryBatchBtn').on('click', function () {
     if (batchRetryBusy || reportHasError || !currentBatchReport || currentBatchReport.active || !(currentBatchReport.retry_macs || []).length || currentBatchReport.batch.id !== currentReportId) return;
     var id = currentReportId;
-    showConfirm('Retry Eligible Phones', 'Retry all eligible phones in this batch using their current mappings and fresh target checks? Search and filters do not limit this action. Required extension-swap partners will be included.', function () {
+    showConfirm('Retry Eligible Phones', 'Retry all eligible phones in this batch using their current mappings and fresh target checks? Search and filters do not limit this action. Required extension-swap partners will be included.'
+      + (reportRetryNeedsReview(currentBatchReport) ? ' Some attempts have uncertain delivery and may already have reached the handset. Review Diagnostics and handset state before confirming.' : ''), function () {
       if (batchRetryBusy || currentReportId !== id || reportHasError || !currentBatchReport || currentBatchReport.active || !(currentBatchReport.retry_macs || []).length) return;
       batchRetryBusy = true;
       updateReportRetryButton();
@@ -1836,6 +2810,7 @@ $(document).ready(function () {
         } else if (currentReportId === id) {
           reportHasError = true;
           setReportMessage('batchReport', (res && res.error ? res.error + ' ' : 'Retry request failed. ') + 'Refresh the report to check its result before retrying.', true);
+          updateReportRecoveryPanel();
         }
         updateReportRetryButton();
         loadPendingCount();
@@ -1924,10 +2899,15 @@ $(document).ready(function () {
   });
 
   function openApplyModal(action) {
+    discoveryReportReturn = null;
+    $('#discoveryReportReturn').hide();
     if (action) selectedPushAction = action;
     var actionMode = selectedPushAction || 'push';
     var selCount = selectedPushMacs.length;
     var count = parseInt($('#pendingBadge').text()) || 0;
+    $('#applyOkBtn').data('discovery', false).data('pending-discovery', []);
+    $('#retryDeliveryFailuresBtn').hide();
+    lastDiscoveryMacs = [];
     $('#applyResults').hide();
     $('#applyResultsContent').empty();
     $('#applyProgress').hide();
@@ -1935,6 +2915,7 @@ $(document).ready(function () {
     $('#applyProgressText').text('Initializing...');
     $('#applyOkBtn').removeClass('btn-primary btn-warning').addClass(actionMode === 'retry' ? 'btn-warning' : 'btn-primary')
       .html('<i class="fa ' + (actionMode === 'retry' ? 'fa-repeat' : 'fa-paper-plane') + '"></i> ' + (actionMode === 'retry' ? 'Retry Push' : 'Push Config')).prop('disabled', false).data('retry', false);
+    $('#applyOkBtn').data('queued-report', null);
 
     if (selCount > 0) {
       $('#applyCountDesc').hide();
@@ -2119,10 +3100,29 @@ $(document).ready(function () {
   }
 
   function showInlineResults(res) {
+    $('#applyOkBtn').data('queued-report', null);
+    $('#applyOkBtn').data('discovery', false);
+    $('#retryDeliveryFailuresBtn').hide();
+    lastDiscoveryMacs = [];
+    lastFailedMacs = [];
+    if (res.queued && res.batch_id) {
+      latestBatchId = res.batch_id;
+      $('#openLatestBatchBtn').show();
+      var terminalReplay = ['complete', 'review'].indexOf(res.queue_status) !== -1;
+      $('#applyResultsContent').html(terminalReplay ? '<div class="alert alert-info"><strong>Saved push already finished</strong> — This request did not resend any notifications. Open the saved report for its outcomes.</div>' : '<div class="alert alert-info"><strong>Push queued</strong> — '
+        + Number(res.selected_count || 0) + ' phone(s), in waves of at most ' + Number(res.wave_size || 25)
+        + '. No delivery or verification is claimed yet. The scheduler starts saved work within its next tick; follow the saved report.</div>');
+      $('#applyResults').show();
+      $('#applyOkBtn').prop('disabled', false).text('View Saved Report').data('retry', false).data('queued-report', res.batch_id);
+      return;
+    }
     var sent = res.notify_sent || res.sent || [];
     var downloaded = res.notify_downloaded || res.downloaded || [];
     var verified = res.notify_verified || res.verified || [];
-    var failed = res.notify_failed || res.failed || [];
+    var failed = (res.notify_failed || res.failed || []).slice();
+    ($('#applyOkBtn').data('pending-discovery') || []).forEach(function (mac) {
+      if (!failed.some(function (phone) { return phone.mac === mac; })) failed.push({mac:mac, next_action:'discovery', error:'Discovery still required; this phone was not included in the delivery retry.'});
+    });
     var incomplete = failed.filter(function (phone) { return phone.status === 'triggered' || phone.status === 'downloaded'; });
     var notifyFailed = failed.filter(function (phone) { return phone.status !== 'triggered' && phone.status !== 'downloaded'; });
     var skipped = (res.notify_skipped || res.skipped || []).filter(function (mac) {
@@ -2165,9 +3165,16 @@ $(document).ready(function () {
     $('#applyResultsContent').html(html);
     $('#applyResults').show();
     if (failed.length > 0 || skipped.length > 0) {
-      lastFailedMacs = Array.from(new Set(failed.filter(function (phone) { return phone.status !== 'downloaded'; })
-        .map(function(f){ return f.mac; }).filter(function(m){ return !!m; }).concat(skipped)));
-      if (lastFailedMacs.length > 0) {
+      var discoveryFailures = failed.filter(function (phone) { return phone.next_action === 'discovery'; });
+      lastDiscoveryMacs = Array.from(new Set(discoveryFailures.map(function (phone) { return phone.mac; }).filter(Boolean).concat(skipped)));
+      lastFailedMacs = Array.from(new Set(failed.filter(function (phone) { return phone.status !== 'downloaded' && phone.next_action !== 'discovery' && phone.next_action !== 'mapping' && phone.next_action !== 'diagnostics'; })
+        .map(function(f){ return f.mac; }).filter(function(m){ return !!m; })));
+      if (lastDiscoveryMacs.length > 0) {
+        $('#applyResultsContent').append('<div class="alert alert-info">Discovery is required for ' + lastDiscoveryMacs.length + ' ' + pluralWord(lastDiscoveryMacs.length, 'phone') + '. Scan the phones\' subnet, identify their MACs, then return to push. '
+          + (lastFailedMacs.length ? 'The other ' + lastFailedMacs.length + ' delivery ' + pluralWord(lastFailedMacs.length, 'failure') + ' can be retried separately; required extension-swap partners are still included.' : '') + '</div>');
+        $('#applyOkBtn').prop('disabled', false).text('Open Device Discovery (' + lastDiscoveryMacs.length + ')').data('retry', false).data('discovery', true);
+        $('#retryDeliveryFailuresBtn').toggle(lastFailedMacs.length > 0).text('Retry Delivery Failures (' + lastFailedMacs.length + ')');
+      } else if (lastFailedMacs.length > 0) {
         $('#applyOkBtn').prop('disabled', false).text('Retry (' + lastFailedMacs.length + ')').data('retry', true);
       } else {
         $('#applyOkBtn').prop('disabled', false).text('Close').data('retry', false);
@@ -2179,7 +3186,20 @@ $(document).ready(function () {
 
   var applying = false;
   var lastFailedMacs = [];
+  var lastDiscoveryMacs = [];
+  $('#retryDeliveryFailuresBtn').off('click').on('click', function () {
+    if (applying || !lastFailedMacs.length) return;
+    $('#applyOkBtn').data('pending-discovery', lastDiscoveryMacs.slice()).data('discovery', false).data('retry', true).trigger('click');
+  });
   $('#applyOkBtn').off('click').on('click', function () {
+    if ($(this).data('queued-report')) {
+      showBatchReport($(this).data('queued-report'), true);
+      return;
+    }
+    if ($(this).data('discovery')) {
+      openDeviceDiscovery(lastDiscoveryMacs);
+      return;
+    }
     if ($(this).text() === 'Close') {
       $('#applyModal').modal('hide');
       return;
@@ -2263,7 +3283,8 @@ $(document).ready(function () {
         $('#applyProgress').hide();
         $('#applyOkBtn').prop('disabled', false);
         if (res && res.success) {
-          var msg = 'Push completed.';
+          if (res.queued) { showInlineResults(res); return; }
+          var msg = 'Configs prepared. Pending handset changes remain until final verification.';
           if (res.generated && res.generated.length > 0) msg += ' Generated ' + res.generated.length + ' config(s).';
           if (res.reboots && res.reboots.length > 0) msg += ' Reboot sent to ' + res.reboots.length + ' phone(s).';
           if (res.skipped_reboot > 0) msg += ' Skipped reboot for ' + res.skipped_reboot + ' new device(s).';
@@ -2452,22 +3473,6 @@ $(document).ready(function () {
   }
 
   // =====================
-  // CONFIG FILES — DELETE ALL
-  // =====================
-  $('#deleteAllConfigBtn').off('click').on('click', function () {
-    showConfirm('Delete All Config Files', 'Delete ALL generated config files? This cannot be undone. (MAC Mapping entries will not be deleted.)', function () {
-      ajax('deleteAllConfigFiles', {}, function (res) {
-        if (res && res.success) {
-          showAlert('success', 'Deleted ' + res.deleted + ' config file(s).');
-          $('#configFilesTable').bootstrapTable('refresh');
-        } else {
-          showAlert('danger', 'Error: ' + (res ? res.error : 'Unknown error'));
-          }
-        });
-      });
-  });
-
-  // =====================
   // LOGS
   // =====================
   $('#clearLogsBtn').off('click').on('click', function () {
@@ -2475,7 +3480,7 @@ $(document).ready(function () {
       ajax('clearLogs', {}, function (res) {
         if (res && res.success) {
           showAlert('success', 'Logs cleared.');
-          $('#logsTable').bootstrapTable('refresh');
+          refreshActivityLogs();
         } else {
           showAlert('danger', 'Error clearing logs.');
         }
@@ -2593,6 +3598,9 @@ $(document).ready(function () {
       if (data) {
         $('#settingsPbxIp').val(data.pbx_ip || '');
         $('#settingsSipPort').val(data.sip_port || '5060');
+        $('#settingsRolloutWaveSize').val(data.rollout_wave_size || '25');
+        $('#settingsRolloutSettleSeconds').val(data.rollout_settle_seconds || '20');
+        $('#settingsPushSearchSubnets').val(data.push_search_subnets || '');
         loadSipTransportInfo(data.transport || 'UDP', data.sip_port || '5060');
         loadSettingsInterfaces(data.pbx_ip || '', data.scan_subnets || '');
          $('#settingsDhcpLeasesFile').val(data.dhcp_leases_file || '/var/lib/misc/dnsmasq.leases');
@@ -2652,6 +3660,9 @@ $(document).ready(function () {
     var data = {
       pbx_ip:   $('#settingsPbxIp').val(),
       transport: $('#settingsTransport').val(),
+      rollout_wave_size: $('#settingsRolloutWaveSize').val(),
+      rollout_settle_seconds: $('#settingsRolloutSettleSeconds').val(),
+      push_search_subnets: $('#settingsPushSearchSubnets').val(),
       scan_subnets: scanSubnetsManual ? $('#settingsScanSubnets').val() : ''
     };
     if ($('input[name="deploy_mode"]:checked').val() === 'dhcp') data.dhcp_leases_file = $('#settingsDhcpLeasesFile').val();
@@ -2837,17 +3848,24 @@ $(document).ready(function () {
   // =====================
   // TAB TRIGGERS
   // =====================
+  // Explicit custom transport shares overlapping refreshes rather than letting
+  // Bootstrap Table abort them during report focus/return navigation.
+  $('#devicesTable').bootstrapTable({ajax: loadMappingGrid});
   $('a[href="#phones"]').off('shown.bs.tab').on('shown.bs.tab', function () {
     if (!liveUpdates.enabled) refreshPhoneTable();
   });
   $('a[href="#devices"]').off('shown.bs.tab').on('shown.bs.tab', function () {
+    if (!navigatingToMappingFromReport && mappingReportReturn) {
+      clearMappingReportReturn(true);
+    }
     $('#devicesTable').bootstrapTable('refresh');
     loadPendingCount();
+  }).on('hide.bs.tab.provisionerMappingReturn', function () {
+    if (mappingReportReturn) {
+      clearMappingReportReturn(true);
+    }
   });
-  $('a[href="#import"]').on('hide.bs.tab.provisionerReports', stopBatchReportPolling);
-  $('a[href="#import"]').on('shown.bs.tab.provisionerReports', function () {
-    if (currentReportId && $('#bulkReportsSection').is(':visible') && !reportRequestPending && reportPollTimer === null) showBatchReport(currentReportId, false);
-  });
+  $('a[href="#logs"]').on('hide.bs.tab.provisionerReports', function () { stopBatchReportPolling(true); });
   $('a[href="#provisioning"]').off('shown.bs.tab').on('shown.bs.tab', function () {
     loadProvisioningInfo();
   });
@@ -2865,7 +3883,11 @@ $(document).ready(function () {
     $('#configFilesTable').bootstrapTable('refresh');
   });
   $('a[href="#logs"]').off('shown.bs.tab').on('shown.bs.tab', function () {
-    $('#logsTable').bootstrapTable('refresh');
+    if ($('#bulkReportsSection').is(':visible')) {
+      if (currentReportId) {
+        if (!reportRequestPending && reportPollTimer === null) showBatchReport(currentReportId, false);
+      } else loadBatchHistory();
+    } else refreshActivityLogs();
   });
   $('a[href="#settings"]').off('shown.bs.tab').on('shown.bs.tab', function () {
     loadSettings();
@@ -3190,7 +4212,7 @@ $(document).ready(function () {
     updateAutoAddSupportedButton();
   }
 
-  function pollDiscoveryJob(jobId) {
+  function pollDiscoveryJob(jobId, onComplete) {
     ajax('getDiscoveryJobStatus', { job_id: jobId }, function (res) {
       if (!res || !res.success) {
         finishDiscoveryJob();
@@ -3216,22 +4238,30 @@ $(document).ready(function () {
         : res.phase === 'local_arp' ? 'Local ping/ARP sweep'
         : res.scan_mode === 'local' ? 'Local ping/ARP + SIP OPTIONS scan'
         : res.scan_mode === 'mixed' ? 'Local ping/ARP + routed SIP OPTIONS scan' : 'Routed SIP OPTIONS scan';
-       var progress = res.total ? label + ': ' + res.done + '/' + res.total + (res.phase === 'local_arp' ? ' passes' : ' probes') : label + ': starting';
+       var progress = res.total ? label + ': ' + res.done + '/' + res.total + (res.type === 'identify' ? ' phones' : (res.phase === 'local_arp' ? ' passes' : ' probes')) : label + ': starting';
+       var failedIdentities = (res.errors || []).length;
+       if (res.type === 'identify' && res.complete) {
+         var attemptedIdentities = res.attempted_count === undefined ? res.total : res.attempted_count;
+         var successfulIdentities = res.identified_count === undefined ? Math.max(0, attemptedIdentities - failedIdentities) : res.identified_count;
+         progress = 'Identification complete: ' + successfulIdentities + '/' + attemptedIdentities + ' selected phones identified; ' + failedIdentities + ' failed.';
+       }
        var methodText = res.type === 'scan' ? $('#discoveryMethodSummary').text() : label;
-       $('#scanStatus').html('<p class="text-muted">' + (res.complete ? '<i class="fa fa-check-circle text-success"></i> ' : '<i class="fa fa-spinner fa-spin"></i> ')
+       $('#scanStatus').html('<p class="text-muted">' + (res.complete ? (failedIdentities ? '<i class="fa fa-exclamation-triangle text-warning"></i> ' : '<i class="fa fa-check-circle text-success"></i> ') : '<i class="fa fa-spinner fa-spin"></i> ')
          + diagnosticsEsc(methodText) + '<br>' + diagnosticsEsc(progress) + ' · <strong>' + identified
          + '</strong> identified Digium/ALE · <strong>' + unknown + '</strong> unidentified SIP IPs'
          + (discoveryExcludedResponders.length ? ' · <strong>' + discoveryExcludedResponders.length + '</strong> other SIP responders excluded' : '')
          + '</p>').show();
        if (res.complete) {
-         scanCompleted = true;
-         finishDiscoveryJob();
+          scanCompleted = true;
+          if (!onComplete) finishDiscoveryJob();
          renderDiscoveryCoverage();
-        (res.errors || []).forEach(function (error) {
-          $('#scanStatus').append('<p class="text-warning">' + diagnosticsEsc(error.ip) + ': ' + diagnosticsEsc(error.error) + '</p>');
-        });
-      } else {
-        setTimeout(function () { pollDiscoveryJob(jobId); }, 1000);
+         (res.errors || []).forEach(function (error) {
+          $('#scanStatus').append('<p class="text-warning"><strong>' + diagnosticsEsc(error.ip) + '</strong>: ' + diagnosticsEsc(error.error)
+            + (error.next_step ? '<br><span class="text-muted">Next: ' + diagnosticsEsc(error.next_step) + '</span>' : '') + '</p>');
+         });
+         if (onComplete) onComplete(res);
+       } else {
+         setTimeout(function () { pollDiscoveryJob(jobId, onComplete); }, 1000);
       }
     });
   }
@@ -3243,15 +4273,62 @@ $(document).ready(function () {
     $('#identifyMacBtn').html('<i class="fa fa-spinner fa-spin"></i> Identifying...');
     updateButtonStates();
     updateAutoAddSupportedButton();
-    ajax('startIdentifyMac', { scan_id: discoveryScanId, ids: ids }, function (res) {
-      if (!res || !res.success) {
+    // Only this explicit Identify action authorizes the selected sequence.
+    // Navigation, ordinary scans, and row selection never enter this path.
+    var scanId = discoveryScanId, chunks = [], completed = 0, identifiedTotal = 0, failedTotal = 0, sequenceErrors = [];
+    for (var offset = 0; offset < ids.length; offset += 32) chunks.push(ids.slice(offset, offset + 32));
+    function nextChunk() {
+      var selected = chunks.shift();
+      if (!selected) {
         finishDiscoveryJob();
-        showAlert('warning', diagnosticsEsc(res ? res.error : 'MAC identification failed.'));
-      } else {
-        pollDiscoveryJob(res.job_id);
+        if (ids.length > 32) {
+          $('#scanStatus').html('<div class="alert ' + (failedTotal ? 'alert-warning' : 'alert-success') + '">Selected identification sequence finished: '
+            + identifiedTotal + '/' + completed + ' identified; ' + failedTotal + ' failed. No phones were pushed.</div>');
+          sequenceErrors.forEach(function (error) {
+            $('#scanStatus').append('<p class="text-warning">' + diagnosticsEsc(error.ip) + ': ' + diagnosticsEsc(error.error)
+              + (error.next_step ? '<br>Next: ' + diagnosticsEsc(error.next_step) : '') + '</p>');
+          });
+        }
+        return;
       }
-    });
+      $('#identifyMacBtn').html('<i class="fa fa-spinner fa-spin"></i> Identifying ' + (completed + 1) + '–' + (completed + selected.length) + '/' + ids.length);
+      ajax('startIdentifyMac', { scan_id: scanId, ids: selected }, function (res) {
+        if (!res || !res.success) {
+          finishDiscoveryJob();
+          if (res && res.callback_test) renderCallbackTest(res.callback_test);
+          showAlert('warning', diagnosticsEsc(res ? res.error : 'MAC identification failed.'));
+        } else {
+          pollDiscoveryJob(res.job_id, function (job) {
+            completed += selected.length;
+            failedTotal += (job.errors || []).length;
+            sequenceErrors = sequenceErrors.concat(job.errors || []);
+            identifiedTotal += job.identified_count === undefined ? Math.max(0, selected.length - (job.errors || []).length) : job.identified_count;
+            nextChunk();
+          });
+        }
+      });
+    }
+    nextChunk();
   }
+
+  function renderCallbackTest(result) {
+    result = result || {};
+    $('#callbackTestResult').html('<div class="alert ' + (result.success ? 'alert-success' : 'alert-warning') + '"><strong>'
+      + diagnosticsEsc(result.message || result.error || 'Callback self-test did not complete.') + '</strong>'
+      + (result.callback_url ? '<br>' + diagnosticsEsc(result.callback_url) : '')
+      + '<br>' + diagnosticsEsc(result.next_step || 'Retry the test and check the PBX web-service logs.') + '</div>').show();
+  }
+
+  $('#testDiscoveryCallbackBtn').off('click').on('click', function () {
+    var button = $(this);
+    if (button.prop('disabled')) return;
+    button.prop('disabled', true);
+    $('#callbackTestResult').text('Testing PBX callback access (no handset traffic)...').show();
+    ajax('testDiscoveryCallback', {}, function (result) {
+      button.prop('disabled', false);
+      renderCallbackTest(result);
+    }, 10000);
+  });
 
   $('#identifyMacBtn').off('click').on('click', function () {
     var ids = selectedDhcpMacs.filter(function (id) {

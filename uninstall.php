@@ -1,2 +1,3 @@
 <?php
-// No system services to clean up since PnP daemon was removed.
+require_once __DIR__ . '/lib/RolloutSchema.php';
+\FreePBX\modules\Provisioner\RolloutSchema::unschedule(\FreePBX::Cron());

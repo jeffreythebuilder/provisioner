@@ -12,6 +12,17 @@ final class TestFreePBX {
     public function Database() { return $this->db; }
 }
 
+// Existing unit fixtures exercise the synchronous generation/identity engine.
+// Production entry points always queue; dedicated rollout fixtures test those.
+class LegacyEngineFixture extends Provisioner {
+    protected function shouldQueuePush() { return false; }
+    protected function asteriskBinaryCandidates() {
+        // Preserve PATH-injected mock executables in legacy isolated fixtures;
+        // production resolves only its fixed absolute-path allowlist.
+        return array_map(function ($directory) { return rtrim($directory,'/') . '/asterisk'; },explode(PATH_SEPARATOR,getenv('PATH') ?: ''));
+    }
+}
+
 $tests = [];
 $tempDirs = [];
 
@@ -36,12 +47,12 @@ function invokePrivate($object, $method, ...$args) {
     return $reflection->invokeArgs($object, $args);
 }
 
-function makeFixture() {
+function makeFixture($persistent = false) {
     global $tempDirs;
     $dir = sys_get_temp_dir() . '/provisioner-tests-' . bin2hex(random_bytes(6));
     if (!mkdir($dir, 0770, true)) throw new RuntimeException('Could not create fixture directory');
     $tempDirs[] = $dir;
-    $db = new PDO('sqlite::memory:');
+    $db = new PDO($persistent ? 'sqlite:'.$dir.'/fixture.sqlite' : 'sqlite::memory:');
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $db->sqliteCreateFunction('NOW', function () { return date('Y-m-d H:i:s'); });
     $db->exec("CREATE TABLE provisioner_settings (key_name TEXT PRIMARY KEY, value TEXT)");
@@ -69,7 +80,8 @@ function makeFixture() {
     foreach ([['prov_dir', $dir], ['pbx_ip', '192.0.2.10'], ['sip_port', '5060'], ['transport', 'UDP'], ['deploy_mode', 'dhcp']] as $setting) {
         $stmt->execute($setting);
     }
-    return [new Provisioner(new TestFreePBX($db)), $db, $dir];
+    \FreePBX\modules\Provisioner\RolloutSchema::install($db);
+    return [new LegacyEngineFixture(new TestFreePBX($db)), $db, $dir];
 }
 
 function insertDevice($db, $mac, $extension, $brand = 'digium', $custom = 0, $pending = 0) {
@@ -920,8 +932,21 @@ test('phone status exposes structured action eligibility for the UI', function (
     assertTrue(strpos($php, "'reboot_eligible' =>") !== false);
 });
 
-test('bulk handler uses one simple navigation and focused panels', function () {
+test('bulk handler keeps import and export while saved reports live under Logs', function () {
     $view = file_get_contents(dirname(__DIR__) . '/views/main.php');
+    $reports = file_get_contents(dirname(__DIR__) . '/views/batch_reports.php');
+    $logs = substr($view, strpos($view, 'id="logs"'), strpos($view, '<!-- ===================== SETTINGS TAB') - strpos($view, 'id="logs"'));
+    assertTrue(strpos($logs, "include __DIR__ . '/batch_reports.php'") !== false);
+    assertTrue(strpos($logs, 'class="logs-pill" id="batchHistoryTab"') !== false);
+    assertTrue(strpos($logs, 'class="nav nav-tabs bulk-handler-nav" role="tablist" aria-label="Logs views"') !== false);
+    assertTrue(strpos($logs, 'nav-pills') === false);
+    assertTrue(strpos($logs, '<h3>Activity Logs</h3>') !== false);
+    assertTrue(strpos($logs, 'class="col-sm-12"') !== false);
+    assertTrue(strpos($view, 'class="bulk-pill" id="batchHistoryTab"') === false);
+    assertTrue(strpos($view, 'id="deleteAllConfigBtn"') === false);
+    assertTrue(strpos($view, 'id="deleteSelectedConfigBtn"') !== false);
+    assertTrue(strpos($view, '> Delete Mappings</button>') === false);
+    $view .= $reports;
     $javascript = file_get_contents(dirname(__DIR__) . '/assets/js/provisioner.js');
     assertTrue(strpos($view, 'bulk-handler-nav') !== false);
     assertTrue(strpos($view, 'class="bulk-input-grid"') !== false);
@@ -938,6 +963,19 @@ test('bulk handler uses one simple navigation and focused panels', function () {
     assertTrue(strpos($view, 'bulk-report-header') !== false);
     assertTrue(strpos($view, 'bulk-report-table') !== false);
     assertTrue(strpos($javascript, "$('#backToBatchHistoryBtn').on('click'") !== false);
+});
+
+test('activity logs use on-demand shared reads with visible failure recovery', function () {
+    $view=file_get_contents(dirname(__DIR__).'/views/main.php');
+    $javascript=file_get_contents(dirname(__DIR__).'/assets/js/provisioner.js');
+    $start=strpos($view,'<table id="logsTable"');$end=strpos($view,'</table>',$start);
+    $table=substr($view,$start,$end-$start);
+    assertTrue(strpos($table,'data-toggle="table"')===false);
+    assertTrue(strpos($table,'data-cookie-id-table="provisioner-logs"')!==false);
+    assertTrue(strpos($view,'id="retryActivityLogsBtn"')!==false);
+    assertTrue(strpos($javascript,'activityLogsWaiters.push(params)')!==false);
+    assertTrue(strpos($javascript,"bootstrapTable({ajax: loadActivityLogs})")!==false);
+    assertTrue(strpos($javascript,'waiter.error(xhr)')!==false);
 });
 
 test('bulk handler closes before the next top-level tab', function () {
@@ -1393,8 +1431,10 @@ test('delayed delivery updates cannot reclaim a newer push', function () {
 });
 
 test('background verification rejects the wrong handset and wrong target address', function () {
+    foreach (['0', '1'] as $forcePush) {
     foreach ([['mac' => '000fd3ffffff', 'ip' => '192.168.188.132'], ['mac' => '000fd3000132', 'ip' => '192.168.188.133']] as $contact) {
         [$module, $db] = makeFixture();
+        $module->setSetting('force_push_without_mac', $forcePush);
         $mac = '000fd3000132';
         insertDevice($db, $mac, '9132', 'digium', 0, 1);
         $db->exec("UPDATE provisioner_devices SET static_ip='192.168.188.132'");
@@ -1403,6 +1443,7 @@ test('background verification rejects the wrong handset and wrong target address
         $result = $module->processPushVerificationJob($id, ['9132' => $contact], [], microtime(true) - 1);
         assertTrue(!$result[$mac]['verified']);
         assertSame(1, (int)$db->query('SELECT needs_changes FROM provisioner_devices')->fetchColumn());
+    }
     }
 });
 
@@ -1509,14 +1550,15 @@ test('module initialization upgrades an old device schema', function () {
     }
 });
 
-test('module and installer versions agree', function () {
+test('module metadata owns version and official hooks never pre-register modules', function () {
     $root = dirname(__DIR__);
     $xml = simplexml_load_file($root . '/module.xml');
-    $version = (string)$xml->version;
+    assertTrue((bool)preg_match('/^\d+\.\d+\.\d+$/',(string)$xml->version));
     foreach (['install.php', 'upgrade.php'] as $file) {
         $content = file_get_contents($root . '/' . $file);
-        $pattern = '/\$version\s*=\s*[\'\"]' . preg_quote($version, '/') . '[\'\"]/';
-        assertTrue((bool)preg_match($pattern, $content), "$file version differs from module.xml");
+        assertTrue(strpos($content,'INSERT INTO modules')===false,"$file must let Module Admin insert the registration");
+        assertTrue(strpos($content,'UPDATE modules SET version')===false,"$file must let Module Admin update version");
+        assertTrue(strpos($content,'LIMIT ".($count-1)')!==false,"$file must preserve one existing row when consolidating duplicates");
     }
 });
 
@@ -1524,6 +1566,14 @@ require __DIR__ . '/live_status.php';
 
 require __DIR__ . '/test_discovery.php';
 require __DIR__ . '/test_bulk_workflow.php';
+
+require __DIR__ . '/test_push_storage.php';
+require __DIR__ . '/test_rollout.php';
+require __DIR__ . '/test_asterisk_cli.php';
+require __DIR__ . '/test_preflight.php';
+
+// Optional integration runner reuses mocks/helpers, never the installed PBX.
+if (defined('PROVISIONER_TEST_DEFINITIONS_ONLY') && PROVISIONER_TEST_DEFINITIONS_ONLY) return;
 
 $passed = 0;
 $failed = 0;

@@ -1,10 +1,28 @@
 <module>
   <rawname>provisioner</rawname>
   <name>Provisioner</name>
-  <version>1.4.41</version>
+  <version>1.4.59</version>
   <publisher>Generated Module</publisher>
   <license>GPLv3</license>
-  <changelog>*1.4.41* Provisions PBX DND and call-forward enable/disable feature codes for Digium A-series and Alcatel/ALE phones, respecting customized and disabled PBX codes without setting handset feature state or forwarding destinations.
+  <changelog>*1.4.59* Leaves module registration and version state to Module Admin, avoiding duplicate rows on FreePBX 16 fresh installs. Official hooks consolidate duplicates from older installers without removing the final registration or provisioning data. Includes the MariaDB 5.5/Python 3.6 compatibility fixes from 1.4.58.
+  *1.4.58* Fixes official install/upgrade constant SELECT statements for MariaDB 5.5 while retaining SQLite test compatibility and repeat-install ownership preservation. Supports Python 3.6 subprocess arguments in optional ARP enrichment and single-IP /32 SIP searches. Validates FreePBX 16 XML migrations and rollout fixtures against isolated MariaDB 5.5. No database reset, OS package installation or change to push identity requirements.
+  *1.4.57* Simplifies report stages and recovery with evidence-based identity labels, five-stage phone details, short history IDs and mapping return navigation. Adds Phone Status-style report Live Updates controls with independent pause/resume and bounded reconnection backoff; pausing observation never pauses provisioning. Shares mapping-grid requests and preserves selections and search context during report navigation. Adds slow-request browser regression coverage.
+  *1.4.56* Fixes Activity Logs tab refreshes aborting overlapping table requests and triggering FreePBX AJAX errors. Loads the table on demand and shares in-flight log reads without disabling global error reporting. Genuine failures show an explicit retry control. Includes a real-browser slow-request and failure/recovery regression fixture.
+  *1.4.55* Aligns Logs sub-tabs with Bulk Handler tab styling, spacing and section headings. Activity Logs and Batch Reports share the same content gutter and tab underline. Preserves report navigation, polling, recovery and existing log controls.
+  *1.4.54* Moves Batch Reports from Bulk Handler to Logs alongside Activity Logs, preserving report links, polling and recovery navigation. Includes the revised report overview, stage drill-downs and phone details. Removes the Config Files Delete All button and shortens MAC Mapping Delete Mappings to Delete. Preserves selections, saved history and push safety requirements.
+  *1.4.53* Moves wave size, post-download wait and approved automatic search networks into collapsed Advanced settings. Report Set Search Range opens the advanced section directly. Preserves saved settings, defaults and explicit search approval.
+  *1.4.52* Simplifies rollout settings with clearer wave-size, post-download pause and automatic-search labels and examples. Distinguishes the settling pause from the verification timeout and known-IP lookup from wider approved searches. Removes non-actionable ARP availability notices without changing local push rules, wave limits, defaults or identity requirements.
+  *1.4.51* Adds automatic routed-phone identity preflight inside Push Config: existing evidence is reused, known SIP endpoints are tried first, and wider searches use only explicitly approved ranges. Matching handset MACs remain mandatory across subnets; conflicts stop before delivery. Adds visible lookup stages and range/retry recovery. Local active ARP is optional best-effort enrichment with unchanged push requirements. Hooks check for existing ARP tooling only; no OS packages, sudoers or capabilities are changed. Preserves registration port and transport for targeting.
+  *1.4.50* Keeps MAC Mapping focused on scoped Push Config instead of substituting Discover Phones. Improves Batch Reports with inline result reasons and next steps, confirmed-target labels, scoped Discovery actions and return navigation, compact recovery instructions, and separate delivery retries. Preserves Details, report history, selections, identity gates and explicit user control of scans, identification and pushes.
+  *1.4.49* Prevents manual Verify Last Push from racing an active rollout or verification worker. Serializes manual verification with queue submission through the database control lock, protects swap partners, and disables the diagnostic action with explanatory guidance until automatic verification finishes. Preserves report and handset state when a stale browser attempts the action.
+  *1.4.48* Resolves the Asterisk CLI through supported absolute paths instead of relying on Cron PATH. Fixes queued rollout registration/MAC verification under the PBX service user without changing crontab or host environment. Applies the same resolution to transport inspection, diagnostic version reporting and existing reboot fallbacks.
+  *1.4.47* Queues complete provisioning workflows durably with bounded verified waves, duplicate and overlap protection, conservative crash recovery, shared download observation, and saved report progress. Installs database migrations and the rollout scheduler through official module hooks. Preserves swap groups, custom configs, handset identity checks and pending changes when finalization is superseded. Adds bounded explicit MAC identification batches. Validated with isolated 300-phone fixtures and MariaDB integration; physical mass-deployment capacity remains unvalidated.
+  *1.4.46* Routes missing-target pushes to Device Discovery instead of futile retries, preserving separately scoped delivery retries for mixed results. Improves diagnostic labels and firmware visibility and adds an allowlisted copyable diagnostic summary with HTTP clipboard fallback. Keeps MAC checks and action selections intact.
+  *1.4.45* Adds an explicit PBX callback-access self-test and Identify MAC preflight with specific HTTP access guidance. Distinguishes SIP rejection/no reply, callback timeouts, and rejected identity signatures; shows selected identification outcomes and next steps without treating job completion as success. Preserves MAC validation and read-only scans.
+  *1.4.44* Removes the force-push-without-MAC-confirmation option and restores mandatory matching identity for routed pushes, including bulk and retries. Retires saved overrides through official install/upgrade hooks and retains the Apache callback installation fix.
+  *1.4.43* Restores the module-scoped discovery receiver Apache access rule through official FreePBX install/upgrade hooks, including when Module Admin drops dotfiles. Keeps core access rules and handset identity validation unchanged.
+  *1.4.42* Adds a default-off force-push-without-MAC-confirmation setting for selected, bulk, pending, and retry pushes. Shows an active warning, logs unverified targets, preserves known MAC conflict blocks, and keeps final handset verification unchanged.
+  *1.4.41* Provisions PBX DND and call-forward enable/disable feature codes for Digium A-series and Alcatel/ALE phones, respecting customized and disabled PBX codes without setting handset feature state or forwarding destinations.
   *1.4.40* Standardizes action buttons and import completion, simplifies Reports into searchable history and compact phone details, and preserves report filters, pages, sorting, and expanded details during live updates. Adds narrow-screen report cards and full-history search.
   *1.4.39* Makes report actions clearer and changes report details to a responsive, searchable, paginated table for large batches.
   *1.4.38* Normalizes Reports-tab button sizing, spacing, icon alignment, and button treatment with the rest of the module.
@@ -58,6 +76,33 @@
   </menuitems>
   <supported>13.0</supported>
   <database>
+    <table name="provisioner_rollouts">
+      <field name="id" type="string" length="32" primarykey="true" notnull="true"/>
+      <field name="status" type="string" length="20" notnull="true"/>
+      <field name="fingerprint" type="string" length="64" notnull="true"/>
+      <field name="request_key" type="string" length="64" notnull="false"/>
+      <field name="waves" type="text" length="16777215" notnull="true"/>
+      <field name="summary" type="text" notnull="false"/>
+      <field name="wave_cursor" type="integer" default="0" notnull="true"/>
+      <field name="heartbeat" type="integer" default="0" notnull="true"/>
+      <field name="expires" type="integer" default="0" notnull="true"/>
+      <field name="token" type="string" length="32" notnull="false"/>
+      <field name="created_at" type="datetime" notnull="true"/>
+      <field name="error" type="text" notnull="false"/>
+      <index name="rollout_request" unique="true"><field name="request_key"/></index>
+      <index name="rollout_queue"><field name="status"/><field name="created_at"/></index>
+    </table>
+    <table name="provisioner_rollout_owners">
+      <field name="mac" type="string" length="12" primarykey="true" notnull="true"/>
+      <field name="rollout_id" type="string" length="32" notnull="true"/>
+      <index name="rollout_owner_job"><field name="rollout_id"/></index>
+    </table>
+    <table name="provisioner_rollout_control">
+      <field name="id" type="integer" primarykey="true" notnull="true"/>
+      <field name="token" type="string" length="32" notnull="false"/>
+      <field name="expires" type="integer" default="0" notnull="true"/>
+      <field name="schema_revision" type="integer" default="0" notnull="true"/>
+    </table>
     <table name="provisioner_batches">
       <field name="id" type="string" length="32" primarykey="true" notnull="true"/>
       <field name="kind" type="string" length="20" notnull="true"/>
@@ -65,13 +110,14 @@
       <field name="status" type="string" length="20" notnull="true"/>
       <field name="created_at" type="datetime" notnull="true"/>
       <field name="finished_at" type="datetime" notnull="false"/>
+      <index name="batch_parent"><field name="parent_id"/></index>
     </table>
     <table name="provisioner_batch_items">
       <field name="batch_id" type="string" length="32" primarykey="true" notnull="true"/>
       <field name="mac" type="string" length="12" primarykey="true" notnull="true"/>
       <field name="job_id" type="string" length="32" notnull="false"/>
       <field name="data" type="text" notnull="true"/>
-      <index name="batch_job"><field name="job_id"/></index>
+      <index name="batch_item_job"><field name="job_id"/><field name="mac"/></index>
     </table>
     <table name="provisioner_logs">
       <field name="id" type="integer" primarykey="true" notnull="true" autoincrement="true"/>
@@ -116,7 +162,7 @@
     <table name="provisioner_push_jobs">
       <field name="id" type="string" length="32" primarykey="true" notnull="true"/>
       <field name="status" type="string" length="20" notnull="true"/>
-      <field name="payload" type="text" notnull="true"/>
+      <field name="payload" type="text" length="16777215" notnull="true"/>
       <field name="created_at" type="datetime" notnull="true"/>
       <field name="finished_at" type="datetime" notnull="false"/>
       <field name="error" type="text" notnull="false"/>

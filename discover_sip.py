@@ -135,7 +135,36 @@ def identify(job, target, directory):
         if reply and not reply['status'].startswith('SIP/2.0 200'):
             break
         time.sleep(0.1)
-    return {'ip': target['ip'], 'identity': None, 'sip_response': reply, 'error': 'No supported MAC identity was received from this IP.'}
+    diagnostic = {}
+    try:
+        diagnostic = json.loads((directory / ('callback-' + target['nonce'] + '.json')).read_text())
+    except (OSError, ValueError):
+        pass
+    status = int(reply['status'].split()[1]) if reply else None
+    if diagnostic.get('ip') == target['ip'] and diagnostic.get('code') == 'identity_mismatch':
+        code = 'identity_mismatch'
+        error = 'The responder MAC does not match the handset(s) selected for this push.'
+        next_step = 'Review the mapped MAC and target IP. No configuration was delivered by identification.'
+    elif diagnostic.get('ip') == target['ip'] and diagnostic.get('code') in ('identity_invalid', 'identity_unsupported'):
+        code = diagnostic['code']
+        error = ('The callback reached the receiver, but its handset model/firmware signature is not recognized.'
+                 if code == 'identity_unsupported' else
+                 'The callback reached the receiver, but its MAC was missing, unsupported, or inconsistent with the handset identity.')
+        next_step = 'Check the phone model and firmware. Review sanitized callback evidence; do not bypass MAC validation.'
+    elif status is not None and status != 200:
+        code = 'sip_rejected'
+        error = 'The handset rejected the identification NOTIFY (SIP %d).' % status
+        next_step = 'Check handset provisioning/NOTIFY support and SIP access settings for this port and transport.'
+    elif reply is None:
+        code = 'sip_no_response'
+        error = 'No SIP reply or validated identity callback was received before the identification timeout.'
+        next_step = 'Check handset IP, SIP port/transport, routing, and firewall. A missing reply does not prove the phone is offline.'
+    else:
+        code = 'callback_timeout'
+        error = 'The handset accepted NOTIFY (SIP 200), but no validated identity callback arrived within 12 seconds.'
+        next_step = 'Run Test Callback Access. If it passes, check phone-to-PBX HTTP reachability, Apache/PHP logs, and shared discovery-job storage permissions. The PBX cannot tell whether a missing callback was blocked or never sent.'
+    return {'ip': target['ip'], 'identity': None, 'sip_response': reply, 'sip_status': status,
+            'code': code, 'error': error, 'next_step': next_step}
 
 
 def run(job, directory):
@@ -149,13 +178,23 @@ def run(job, directory):
         if not ports or len(ports) > 3 or len(tls_ports) > 2 or any(not 1 <= port <= 65535 for port in ports + tls_ports):
             raise ValueError('Invalid discovery ports')
         endpoints = [(port, transport) for port in ports for transport in ('udp', 'tcp')] + [(port, 'tls') for port in tls_ports]
-        targets = [{'ip': str(ip), 'port': port, 'transport': transport} for ip in network.hosts() for port, transport in endpoints]
+        # Python 3.6's ipaddress can yield no hosts for /32. A deliberately
+        # approved single-IP range must still probe that one address.
+        hosts = [network.network_address] if network.num_addresses == 1 else network.hosts()
+        targets = [{'ip': str(ip), 'port': port, 'transport': transport} for ip in hosts for port, transport in endpoints]
         # Fail visibly if the configured PBX source cannot be bound.
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as check:
             check.bind((payload['source_ip'], 0))
         function = lambda target: exchange(payload['source_ip'], target)
         key = 'responses'
         workers = 64
+    elif job['type'] == 'probe':
+        targets = payload['targets']
+        if not targets or len(targets) > 256:
+            raise ValueError('Targeted SIP probing is limited to 256 endpoints')
+        function = lambda target: exchange(payload['source_ip'], target)
+        key = 'responses'
+        workers = 16
     elif job['type'] == 'identify':
         targets = payload['targets']
         if not targets or len(targets) > 32:
@@ -165,7 +204,7 @@ def run(job, directory):
         workers = 16
     else:
         raise ValueError('Invalid discovery action')
-    result = {'phase': 'sip_options' if job['type'] == 'scan' else 'identify', 'done': 0, 'total': len(targets), key: []}
+    result = {'phase': 'sip_options' if job['type'] in ('scan','probe') else 'identify', 'done': 0, 'total': len(targets), key: []}
     path = directory / 'progress.json'
     write_json(path, result)
     with ThreadPoolExecutor(max_workers=workers) as pool:

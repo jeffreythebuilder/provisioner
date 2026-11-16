@@ -31,7 +31,7 @@ class SipDiscovery {
     }
 
     public function create($type, $payload) {
-        if (!in_array($type, ['scan', 'identify'], true)) throw new \RuntimeException('Invalid discovery action.');
+        if (!in_array($type, ['scan', 'identify', 'probe'], true)) throw new \RuntimeException('Invalid discovery action.');
         if (!is_dir($this->directory) && !@mkdir($this->directory, 0700, true) && !is_dir($this->directory)) {
             throw new \RuntimeException('Discovery storage is unavailable.');
         }
@@ -121,7 +121,22 @@ class SipDiscovery {
         }
         if (!$target) return false;
         $identity = self::identity($userAgent, $filename);
-        if (!$identity) return false;
+        if (!$identity) {
+            // Only active job + exact source IP + nonce may produce diagnostic
+            // evidence. Never retain raw headers, credentials, or request URLs.
+            self::writeJson($this->path($id, 'callback-' . $nonce . '.json'), [
+                'ip' => $ip, 'code' => self::fingerprint($userAgent) ? 'identity_invalid' : 'identity_unsupported',
+                'seen_at' => microtime(true)]);
+            return false;
+        }
+        $expected = $target['expected_mac'] ?? null;
+        $allowed = $target['expected_macs'] ?? null;
+        if (($expected !== null && $identity['mac'] !== $expected)
+            || ($allowed !== null && !in_array($identity['mac'],$allowed,true))) {
+            self::writeJson($this->path($id, 'callback-' . $nonce . '.json'), [
+                'ip'=>$ip,'code'=>'identity_mismatch','seen_at'=>microtime(true)]);
+            return false;
+        }
         $identity += ['ip' => $ip, 'sip_port' => $target['port'], 'sip_transport' => $target['transport'],
             'source' => 'SIP discovery fetch (HTTP 404)', 'filename' => $filename, 'http_status' => 404,
             'seen_at' => microtime(true), 'last_seen' => date('Y-m-d H:i:s')];

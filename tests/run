@@ -5,8 +5,10 @@ cd "$(dirname "$0")/.."
 php tests/run.php
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests/test_fetch_digium.py
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests/test_discovery.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests/test_active_arp.py
 php -l Provisioner.class.php
 php -l views/main.php
+php -l views/batch_reports.php
 php -l verify_push.php
 php -l live_status.php
 php -l lib/LiveStatus.php
@@ -14,7 +16,22 @@ php -l page.provisioner.php
 php -l discovery_receiver.php
 php -l discovery_worker.php
 php -l lib/SipDiscovery.php
+php -l lib/ReceiverAccess.php
+php -l lib/CallbackDiagnostics.php
+php -l lib/DiagnosticSummary.php
 php -l lib/BulkWorkflow.php
+php -l lib/PushJobSchema.php
+php -l lib/RolloutSchema.php
+php -l lib/RolloutQueue.php
+php -l lib/FetchLogObserver.php
+php -l lib/PushPreflight.php
+php -l lib/ActiveArp.php
+php -l rollout_worker.php
+php -l install.php
+php -l upgrade.php
+php -l uninstall.php
+php -l tests/test_mariadb.php
+php -l tests/mariadb_hooks.php
 node --check assets/js/provisioner.js
 node --check assets/js/live-status.js
 node --check assets/js/discovery.js

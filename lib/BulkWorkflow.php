@@ -4,6 +4,114 @@ namespace FreePBX\modules\Provisioner;
 
 trait BulkWorkflow {
     private $activeBatchId;
+    private $deferBatchReconciliation = false;
+    private $dirtyBatchReports = [];
+
+    protected function shouldQueuePush() { return true; }
+
+    public function processRolloutQueue() {
+        $queue = new RolloutQueue($this->db);
+        $worked = $queue->workOne(function ($id, $wave, $queue) {
+            $this->activeBatchId = $id;
+            $this->rolloutQueueContext = $queue;
+            try { return $this->executeRolloutWave($id, $wave, $queue); }
+            finally {
+                foreach ($this->waveFetchObservations as &$observation) $this->finishFetchObservation($observation);
+                unset($observation);
+                $this->waveFetchObservations = [];
+                $this->waveFetchObserver = null;
+                $this->preflightArpMap = [];
+                $this->activeBatchId = null;
+                $this->rolloutQueueContext = null;
+            }
+        });
+        if ($worked) {
+            try { $this->notifyLiveStatus(); } catch (\Throwable $error) { /* Saved report polling remains authoritative. */ }
+        }
+        return $worked;
+    }
+
+    protected function executeRolloutWave($id, $wave, $queue) {
+        $queue->heartbeat();
+        $expanded = $this->expandPushSelection($wave);
+        if (array_diff($expanded,$wave) || array_diff($wave,$expanded)) throw new \RuntimeException('Extension swap membership changed while queued. Submit a new push after review.');
+        $stmt = $this->db->prepare('SELECT i.mac,i.data,d.* FROM provisioner_batch_items i LEFT JOIN provisioner_devices d ON d.mac_address=i.mac WHERE i.batch_id=?');
+        $stmt->execute([$id]);
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            if (!in_array($row['mac'], $wave, true)) continue;
+            $saved = json_decode($row['data'], true, 512, JSON_THROW_ON_ERROR);
+            if ($this->batchMappingSnapshot($row) != $saved['snapshot']) throw new \RuntimeException('A queued mapping changed. No further phones in this rollout will be notified. Submit a new push after review.');
+            if (array_key_exists('config_revision',$saved) && $this->configRevision($row['mac']) !== $saved['config_revision']) throw new \RuntimeException('A queued config file changed. Review it and submit a new push.');
+            $this->patchBatchItem($id,$row['mac'],['outcome'=>'running']);
+        }
+        if (!$this->preflightRolloutWave($id,$wave,$queue)) return false;
+        // Preflight can take time. Never generate or dispatch for a mapping or
+        // config revision edited while finding a handset.
+        $stmt->execute([$id]);
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            if (!in_array($row['mac'],$wave,true)) continue;
+            $saved=json_decode($row['data'],true,512,JSON_THROW_ON_ERROR);
+            if ($this->batchMappingSnapshot($row)!=$saved['snapshot'] || (array_key_exists('config_revision',$saved) && $this->configRevision($row['mac'])!==$saved['config_revision'])) {
+                throw new \RuntimeException('A mapping or config changed during identity preflight. No configuration was sent; review and submit a new push.');
+            }
+        }
+        if (array_diff($this->expandPushSelection($wave),$wave)) throw new \RuntimeException('Swap membership changed during identity preflight. Review before pushing.');
+        // Re-evaluate targets and identity in this wave, never at submission.
+        // This also preserves generation, missing configs, custom configs, swaps.
+        $result = $this->pushToPhonesInternal($wave);
+        foreach ($result['notify_failed'] ?? $result['failed'] ?? [] as $phone) {
+            $this->patchBatchItem($id,$phone['mac'],['outcome'=>'incomplete', 'error'=>$phone['error'] ?? 'Push failed', 'next_action'=>$phone['next_action'] ?? 'push', 'retry_requires_review'=>!empty($phone['delivery_uncertain'])]);
+        }
+        $report = $this->getBatchReport($id);
+        if (empty($report['success'])) throw new \RuntimeException('Could not read the saved rollout report after a wave.');
+        $healthy = true;
+        $seen = 0;
+        foreach ($report['items'] as $item) {
+            if (in_array($item['mac'],$wave,true)) {
+                $seen++;
+                if ($item['outcome'] !== 'verified') $healthy = false;
+            }
+        }
+        return $healthy && $seen === count($wave);
+    }
+
+    private function queuePushBatch($command, $devices, $parent) {
+        try {
+            PushJobSchema::assertReady($this->db);
+            $queue = new RolloutQueue($this->db);
+            $key = $_REQUEST['request_id'] ?? '';
+            if (!is_string($key) || strlen($key) > 128 || ($key !== '' && !preg_match('/^[a-zA-Z0-9_-]{16,128}$/D', $key))) throw new \RuntimeException('Invalid push request identity.');
+            $limit = (int)$this->getSetting('rollout_wave_size');
+            $limit = $limit > 0 ? max(1,min(30,$limit)) : 25;
+            $this->db->beginTransaction();
+            // Serialize ownership/report/job insertion. Mapping/config revisions
+            // and swap membership are revalidated again by the worker.
+            $id = $queue->submit(bin2hex(random_bytes(16)), $devices, $this->getPendingExtensionSwapGroups(), $command, $key, $limit, function ($id) use ($devices,$parent) {
+                // Only read config content after ownership/deduplication checks.
+                // A duplicate submission must not trip another wave's atime
+                // fallback by hashing files while it observes handset fetches.
+                foreach ($devices as &$device) $device['config_revision'] = $this->configRevision($device['mac_address']);
+                unset($device);
+                $this->createWorkflowBatch('push',$devices,$parent,$id);
+                foreach ($devices as $device) $this->patchBatchItem($id,$device['mac_address'],['outcome'=>'queued']);
+                $this->db->prepare("UPDATE provisioner_batches SET status='queued' WHERE id=?")->execute([$id]);
+            });
+            $this->db->commit();
+            try { $this->notifyLiveStatus(); } catch (\Throwable $error) { /* Do not turn a committed submission into an apparent failure. */ }
+            return ['success'=>true,'queued'=>true,'queue_status'=>$queue->submissionStatus(),'batch_id'=>$id,'selected_count'=>count($devices),'wave_size'=>$limit,
+                'sent'=>[], 'downloaded'=>[], 'verified'=>[], 'failed'=>[], 'message'=>'Saved to the background rollout queue. Open the saved report for progress.'];
+        } catch (\Throwable $error) {
+            if ($this->db->inTransaction()) $this->db->rollBack();
+            return ['success'=>false,'error'=>$error->getMessage(),'sent'=>[],'downloaded'=>[],'verified'=>[],'failed'=>[]];
+        }
+    }
+
+    private function flushBatchReconciliation() {
+        $this->deferBatchReconciliation = false;
+        $ids = array_keys($this->dirtyBatchReports);
+        $this->dirtyBatchReports = [];
+        foreach ($ids as $id) $this->getBatchReport($id);
+    }
 
     private function ensureBatchTables() {
         $this->db->exec("CREATE TABLE IF NOT EXISTS provisioner_batches (id VARCHAR(32) PRIMARY KEY, kind VARCHAR(20) NOT NULL, parent_id VARCHAR(32), status VARCHAR(20) NOT NULL, created_at DATETIME NOT NULL, finished_at DATETIME)");
@@ -148,14 +256,15 @@ trait BulkWorkflow {
         return array_intersect_key($device, array_flip(['id','mac_address','extension','description','brand','static_ip','static_mask','static_gw','custom_config','updated_at']));
     }
 
-    private function createWorkflowBatch($kind, $rows, $parent = null) {
-        $id = bin2hex(random_bytes(16));
+    private function createWorkflowBatch($kind, $rows, $parent = null, $id = null) {
+        $id = $id ?: bin2hex(random_bytes(16));
         if (!$this->db->prepare("INSERT INTO provisioner_batches (id,kind,parent_id,status,created_at) VALUES (?,?,?,'running',NOW())")->execute([$id,$kind,$parent])) throw new \RuntimeException('Could not save batch report.');
         foreach ($rows as $row) {
             $mac = strtolower($row['mac'] ?? $row['mac_address']);
             $data = ['mac'=>$mac, 'extension'=>$row['extension'], 'brand'=>$row['brand'], 'snapshot'=>$this->batchMappingSnapshot($row),
                 'import'=>$kind === 'import' ? 'pending' : 'mapped', 'generation'=>'not_started', 'trigger'=>'not_started', 'delivery'=>'not_started',
                 'verification'=>'not_started', 'outcome'=>'running', 'error'=>'', 'target_ip'=>null];
+            if (array_key_exists('config_revision',$row)) $data['config_revision'] = $row['config_revision'];
             if ($kind === 'import') $data += ['row'=>$row['row'], 'action'=>$row['action'], 'changes'=>$row['changes']];
             if ($kind === 'push') {
                 $prior = $this->db->prepare("SELECT i.batch_id,i.data FROM provisioner_batch_items i JOIN provisioner_batches b ON b.id=i.batch_id WHERE b.kind='import' AND i.mac=? ORDER BY b.created_at DESC LIMIT 1");
@@ -196,7 +305,10 @@ trait BulkWorkflow {
         $stmt->execute([$jobId,strtolower($mac)]);
         foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $id) {
             $this->patchBatchItem($id,$mac,$patch);
-            if (isset($patch['outcome']) && !in_array($patch['outcome'],['running','verifying'],true)) $this->getBatchReport($id);
+            if (isset($patch['outcome']) && !in_array($patch['outcome'],['running','verifying'],true)) {
+                if ($this->deferBatchReconciliation) $this->dirtyBatchReports[$id] = true;
+                else $this->getBatchReport($id);
+            }
         }
     }
 
@@ -211,6 +323,7 @@ trait BulkWorkflow {
         }
         if ($selected) $devices = array_values(array_filter($devices, function ($row) use ($selected) { return in_array($row['mac_address'],$selected,true); }));
         if (!$devices) return ['success'=>false,'error'=>'No mapped phones selected.'];
+        if ($this->shouldQueuePush()) return $this->queuePushBatch($command,$devices,$parent);
         $this->db->beginTransaction();
         try {
             $id = $this->createWorkflowBatch('push',$devices,$parent);
@@ -223,7 +336,7 @@ trait BulkWorkflow {
         try {
             $result = $callback();
             $failed = $result['notify_failed'] ?? $result['failed'] ?? [];
-            foreach ($failed as $phone) $this->patchBatchItem($id,$phone['mac'],['outcome'=>'failed','error'=>$phone['error'] ?? 'Push failed']);
+            foreach ($failed as $phone) $this->patchBatchItem($id,$phone['mac'],['outcome'=>'failed','error'=>$phone['error'] ?? 'Push failed', 'next_action'=>$phone['next_action'] ?? null]);
             $stmt = $this->db->prepare('SELECT mac,data FROM provisioner_batch_items WHERE batch_id=?'); $stmt->execute([$id]);
             foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $item) {
                 $data = json_decode($item['data'],true);
@@ -245,27 +358,40 @@ trait BulkWorkflow {
         if (!is_string($id) || !preg_match('/^[a-f0-9]{32}$/',$id)) return ['success'=>false,'error'=>'Invalid batch ID.'];
         $stmt = $this->db->prepare('SELECT * FROM provisioner_batches WHERE id=?'); $stmt->execute([$id]); $batch = $stmt->fetch(\PDO::FETCH_ASSOC);
         if (!$batch) return ['success'=>false,'error'=>'Batch not found.'];
+        $rollout = null;
+        if ($this->shouldQueuePush()) {
+            $job = $this->db->prepare('SELECT status,heartbeat,expires,wave_cursor AS `cursor`,error FROM provisioner_rollouts WHERE id=?');
+            if ($job && $job->execute([$id])) $rollout = $job->fetch(\PDO::FETCH_ASSOC) ?: null;
+        }
         $stmt = $this->db->prepare('SELECT mac,job_id,data FROM provisioner_batch_items WHERE batch_id=? ORDER BY mac'); $stmt->execute([$id]);
         $batchItems = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         $stmt = $this->db->prepare('SELECT d.* FROM provisioner_devices d INNER JOIN provisioner_batch_items i ON i.mac=d.mac_address WHERE i.batch_id=?');
         $stmt->execute([$id]); $currentDevices = array_column($stmt->fetchAll(\PDO::FETCH_ASSOC),null,'mac_address');
         $items = []; $counts = []; $retry = [];
+        $searchConfigured=trim((string)$this->getSetting('push_search_subnets'))!=='';
         foreach ($batchItems as $item) {
             $data = json_decode($item['data'],true);
-            if (in_array($data['outcome'],['running','verifying'],true) && strtotime($batch['created_at']) < time()-600) {
+            if (!$rollout && in_array($data['outcome'],['running','verifying'],true) && strtotime($batch['created_at']) < time()-600) {
                 $data = array_replace($data,['outcome'=>'incomplete','error'=>'Batch stopped before completion. Review handset state before retrying.']);
                 $this->patchBatchItem($id,$item['mac'],['outcome'=>$data['outcome'],'error'=>$data['error']]);
             }
             $current = $currentDevices[$item['mac']] ?? null;
             $data['mapping_changed'] = !$current || $this->batchMappingSnapshot($current) != $data['snapshot'];
             $data['superseded_by_push'] = !empty($item['job_id']) && !empty($current['last_push_job_id']) && $item['job_id'] !== $current['last_push_job_id'];
-            $data['retryable'] = $batch['kind'] === 'push' && in_array($data['outcome'],['failed','incomplete','blocked'],true) && !$data['mapping_changed'] && !$data['superseded_by_push'];
+            // Historical discovery-blocked reports can now explicitly retry via
+            // automatic preflight. Keep their saved error/action unchanged.
+            $data['can_auto_find']=$this->shouldQueuePush() && $batch['kind']==='push' && ($data['next_action']??'')==='discovery'
+                && !$data['mapping_changed'] && !$data['superseded_by_push'] && empty($data['retry_requires_review']);
+            $blockedAction = (in_array($data['next_action'] ?? '', ['discovery','mapping','diagnostics'],true) && empty($data['retry_requires_review']))
+                || (($data['next_action']??'')==='search_range' && !$searchConfigured);
+            if ($data['can_auto_find']) $blockedAction=false;
+            $data['retryable'] = $batch['kind'] === 'push' && in_array($data['outcome'],['failed','incomplete','blocked'],true) && !$data['mapping_changed'] && !$data['superseded_by_push'] && !$blockedAction;
             if ($data['retryable']) $retry[] = $item['mac'];
             unset($data['snapshot']);
             $items[] = $data; $counts[$data['outcome']] = ($counts[$data['outcome']] ?? 0)+1;
         }
-        $active = !empty($counts['running']) || !empty($counts['verifying']);
-        if (!$active && $batch['kind'] === 'push') {
+        $active = $rollout ? in_array($rollout['status'],['queued','running'],true) : (!empty($counts['queued']) || !empty($counts['running']) || !empty($counts['verifying']));
+        if (!$active && !$rollout && $batch['kind'] === 'push') {
             $status = count($items) === ($counts['verified'] ?? 0) ? 'complete' : 'incomplete';
             $this->db->prepare('UPDATE provisioner_batches SET status=?,finished_at=COALESCE(finished_at,NOW()) WHERE id=?')->execute([$status,$id]);
             $batch['status'] = $status;
@@ -273,7 +399,7 @@ trait BulkWorkflow {
         }
         $childrenStmt = $this->db->prepare('SELECT id,kind,status,created_at FROM provisioner_batches WHERE parent_id=? ORDER BY created_at,id');
         $childrenStmt->execute([$id]);
-        return ['success'=>true,'batch'=>$batch,'items'=>$items,'counts'=>$counts,'active'=>$active,'retry_macs'=>$retry,
+        return ['success'=>true,'batch'=>$batch,'items'=>$items,'counts'=>$counts,'active'=>$active,'retry_macs'=>$active ? [] : $retry, 'rollout'=>$rollout,
             'children'=>$childrenStmt->fetchAll(\PDO::FETCH_ASSOC)];
     }
 
@@ -292,7 +418,7 @@ trait BulkWorkflow {
                 "EXISTS (SELECT 1 FROM provisioner_batch_items i WHERE i.batch_id=b.id AND (LOWER(i.mac) LIKE ? ESCAPE '!' OR LOWER(i.data) LIKE ? ESCAPE '!'))"];
             $params = [$like,$like,$like,$like,$macLike,$like];
             $statuses = [];
-            foreach (['submitted'=>'In progress','running'=>'In progress','complete'=>'Complete','incomplete'=>'Needs attention','failed'=>'Failed'] as $status=>$label) {
+            foreach (['queued'=>'Queued','submitted'=>'In progress','running'=>'In progress','complete'=>'Complete','incomplete'=>'Needs attention','failed'=>'Failed'] as $status=>$label) {
                 if (stripos($label,$search) !== false) $statuses[] = $status;
             }
             if ($statuses) {
@@ -305,10 +431,17 @@ trait BulkWorkflow {
         $count->execute($params); $total = (int)$count->fetchColumn();
         // Clamp an old page after search/deletion instead of leaving a non-empty history on a blank page.
         if ($total && $offset >= $total) $offset = (int)(floor(($total-1)/$limit)*$limit);
-        $stmt = $this->db->prepare('SELECT b.*, (SELECT COUNT(*) FROM provisioner_batch_items i WHERE i.batch_id=b.id) AS device_count FROM provisioner_batches b'
-            . $where . ' ORDER BY ' . $sort . ' ' . $order . ',b.id ' . $order . ' LIMIT ' . $limit . ' OFFSET ' . $offset);
+        $summarySelect = $this->shouldQueuePush() ? ',r.summary AS rollout_summary' : '';
+        $summaryJoin = $this->shouldQueuePush() ? ' LEFT JOIN provisioner_rollouts r ON r.id=b.id' : '';
+        $stmt = $this->db->prepare('SELECT b.*' . $summarySelect . ', (SELECT COUNT(*) FROM provisioner_batch_items i WHERE i.batch_id=b.id) AS device_count FROM provisioner_batches b'
+            . $summaryJoin . $where . ' ORDER BY ' . $sort . ' ' . $order . ',b.id ' . $order . ' LIMIT ' . $limit . ' OFFSET ' . $offset);
         $stmt->execute($params); $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         foreach ($rows as &$row) {
+            if (isset($row['rollout_summary'])) {
+                $row['counts'] = json_decode($row['rollout_summary'],true) ?: [];
+                unset($row['rollout_summary']);
+                continue;
+            }
             $report = $this->getBatchReport($row['id']); $row = $report['batch']; $row['counts'] = $report['counts']; $row['device_count'] = count($report['items']);
         }
         unset($row);

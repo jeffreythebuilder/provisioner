@@ -1,5 +1,13 @@
 import contextlib
 import http.client
+from http.server import BaseHTTPRequestHandler
+try:
+    from http.server import ThreadingHTTPServer
+except ImportError:  # Python 3.6 on FreePBX 16/CentOS 7.
+    from http.server import HTTPServer
+    from socketserver import ThreadingMixIn
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
 import json
 import os
 from pathlib import Path
@@ -12,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import discover_sip
@@ -19,6 +28,29 @@ import send_sip_notify_bulk
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class AutomaticProbeTests(unittest.TestCase):
+    def test_targeted_probe_sends_options_only_to_the_recorded_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory, Phone() as phone:
+            job = {'type': 'probe', 'payload': {'source_ip': '127.0.0.1', 'targets': [
+                {'ip': '127.0.0.1', 'port': phone.port, 'transport': 'udp'}]}}
+            result = discover_sip.run(job, Path(directory))
+            self.assertEqual(1, result['done'])
+            self.assertEqual('sip_options', result['phase'])
+            self.assertEqual(phone.port, result['responses'][0]['port'])
+            self.assertTrue(phone.packets)
+            self.assertTrue(all(packet.startswith('OPTIONS ') for packet in phone.packets))
+
+    def test_unexpected_callback_identity_is_reported_without_authorizing_delivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = {'ip': '127.0.0.1', 'port': 5060, 'transport': 'udp', 'nonce': 'a' * 32}
+            (Path(directory) / ('callback-' + target['nonce'] + '.json')).write_text(json.dumps({'ip': target['ip'], 'code': 'identity_mismatch'}))
+            job = {'id': 'b' * 32, 'payload': {'receiver_url': 'http://127.0.0.1/receiver', 'source_ip': '127.0.0.1'}}
+            with patch.object(discover_sip, 'exchange', return_value=None), patch.object(discover_sip.time, 'monotonic', side_effect=[0, 13]):
+                result = discover_sip.identify(job, target, Path(directory))
+            self.assertEqual('identity_mismatch', result['code'])
+            self.assertIsNone(result['identity'])
 
 
 class Phone:
@@ -100,11 +132,16 @@ class Phone:
 
 
 @contextlib.contextmanager
-def receiver(directory):
+def receiver(directory, full_path=False):
     with socket.socket() as reserve:
         reserve.bind(('127.0.0.1', 0))
         port = reserve.getsockname()[1]
-    process = subprocess.Popen(['php', '-S', '127.0.0.1:%d' % port, '-t', str(ROOT)],
+    docroot = ROOT
+    if full_path:
+        docroot = directory / 'web'
+        (docroot / 'admin/modules').mkdir(parents=True)
+        (docroot / 'admin/modules/provisioner').symlink_to(ROOT, target_is_directory=True)
+    process = subprocess.Popen(['php', '-S', '127.0.0.1:%d' % port, '-t', str(docroot)],
                                env=dict(os.environ, TMPDIR=str(directory), PROVISIONER_DISCOVERY_DIRECTORY=str(directory / ('provisioner-discovery-%d' % os.geteuid()))),
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -117,7 +154,7 @@ def receiver(directory):
                 if process.poll() is not None or time.monotonic() >= deadline:
                     raise RuntimeError('Test receiver did not start')
                 time.sleep(0.02)
-        yield 'http://127.0.0.1:%d/discovery_receiver.php' % port
+        yield 'http://127.0.0.1:%d%s/discovery_receiver.php' % (port, '/admin/modules/provisioner' if full_path else '')
     finally:
         process.terminate()
         process.wait(timeout=5)
@@ -209,6 +246,67 @@ class DiscoveryTests(unittest.TestCase):
                 self.assertEqual(404, status)
                 self.assertEqual(b'Not Found\n', body)
             self.assertEqual([], list(Path(temporary).rglob('receipt-*.json')))
+
+    def test_callback_self_test_proves_php_response_without_jobs_or_identity_evidence(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as temporary, receiver(Path(temporary), full_path=True) as url:
+            challenge = secrets.token_hex(16)
+            status, body, headers = get(url + '/self-test/' + challenge, 'Provisioner-Callback-Self-Test')
+            self.assertEqual(404, status)
+            self.assertEqual(b'Not Found\n', body)
+            self.assertEqual(challenge, headers['X-Provisioner-Receiver'])
+            result = subprocess.run(['php', '-r', 'require $argv[1]; echo json_encode(\\FreePBX\\modules\\Provisioner\\CallbackDiagnostics::check("127.0.0.1",$argv[2]));',
+                                     str(ROOT / 'lib/CallbackDiagnostics.php'), str(urlsplit(url).port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
+            self.assertTrue(json.loads(result.stdout)['success'], result.stdout)
+            for pattern in ('job.json', 'receipt-*.json', 'callback-*.json'):
+                self.assertEqual([], list(Path(temporary).rglob(pattern)))
+
+    def test_identification_failures_have_specific_codes_without_claiming_unknown_http_status(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as temporary:
+            directory = Path(temporary)
+            target = {'ip': '127.0.0.1', 'port': 5060, 'transport': 'udp', 'nonce': secrets.token_hex(16)}
+            job = {'id': secrets.token_hex(16), 'payload': {'receiver_url': 'http://127.0.0.1:2001/discovery_receiver.php', 'source_ip': '127.0.0.1'}}
+            for status, diagnostic, expected in [(None, None, 'sip_no_response'), (403, None, 'sip_rejected'),
+                (200, None, 'callback_timeout'), (200, 'identity_unsupported', 'identity_unsupported'), (200, 'identity_invalid', 'identity_invalid')]:
+                path = directory / ('callback-' + target['nonce'] + '.json')
+                if path.exists():
+                    path.unlink()
+                if diagnostic:
+                    path.write_text(json.dumps({'ip': target['ip'], 'code': diagnostic}))
+                reply = {'status': 'SIP/2.0 %d Reply' % status} if status else None
+                with patch.object(discover_sip, 'exchange', return_value=reply), patch.object(discover_sip.time, 'monotonic', side_effect=[0, 0, 13]), patch.object(discover_sip.time, 'sleep'):
+                    result = discover_sip.identify(job, target, directory)
+                self.assertEqual(expected, result['code'])
+                self.assertTrue(result['next_step'])
+                self.assertIsNone(result['identity'])
+                if expected == 'callback_timeout':
+                    self.assertNotIn('HTTP 403', result['error'])
+
+    def test_callback_probe_classifies_web_failures_without_following_redirects(self):
+        paths = []
+        class Handler(BaseHTTPRequestHandler):
+            status = 403
+            def do_GET(self):
+                paths.append(self.path)
+                self.send_response(self.status)
+                self.send_header('Location', '/must-not-follow')
+                self.end_headers()
+                self.wfile.write(b'generic web page with private details')
+            def log_message(self, *_):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for status, expected in [(403,'callback_forbidden'),(401,'callback_authentication'),(302,'callback_redirect'),(404,'callback_unexpected')]:
+                Handler.status = status
+                result = subprocess.run(['php', '-r', 'require $argv[1]; echo json_encode(\\FreePBX\\modules\\Provisioner\\CallbackDiagnostics::check("127.0.0.1",$argv[2]));',
+                    str(ROOT / 'lib/CallbackDiagnostics.php'), str(server.server_port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
+                self.assertEqual(expected, json.loads(result.stdout)['code'])
+                self.assertNotIn('private details', result.stdout)
+            self.assertEqual(4, len(paths))
+            self.assertTrue(all(re.search(r'/self-test/[a-f0-9]{32}$', path) for path in paths))
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=3)
 
     def test_normal_push_uses_discovered_port_and_transport(self):
         for transport in ('udp', 'tcp', 'tls'):

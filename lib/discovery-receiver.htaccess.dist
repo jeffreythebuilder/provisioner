@@ -1,0 +1,12 @@
+# The handset identity receiver is deliberately public and always returns 404.
+# Other module PHP files retain FreePBX's inherited access restrictions.
+<Files "discovery_receiver.php">
+    AcceptPathInfo On
+    <IfModule mod_authz_core.c>
+        Require all granted
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Allow from all
+    </IfModule>
+</Files>

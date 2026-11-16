@@ -47,41 +47,131 @@ $moduleName = 'provisioner';
 #provisioner-app .bulk-saved-heading { margin:0; color:#2e6b30; font-weight:600; }
 #provisioner-app .bulk-saved-heading i { margin-right:4px; }
 #provisioner-app .bulk-saved-details { display:block; margin-top:3px; color:#5b6570; }
-#provisioner-app .bulk-report-controls { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px 12px; margin:0 0 8px; }
+#provisioner-app .bulk-report-controls { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px 12px; margin:0; }
 #provisioner-app .bulk-report-control-group { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
 #provisioner-app .bulk-report-toolbar { width:100%; }
-#provisioner-app .bulk-report-toolbar label { margin:0; font-weight:normal; color:#5b6570; }
+#provisioner-app .bulk-report-toolbar label { margin:0; font-weight:600; font-size:12px; color:#5b6570; }
 #provisioner-app .bulk-report-toolbar .provisioner-filter-select { min-height:32px; margin:0; }
-#provisioner-app #bulkReportsSection .fixed-table-toolbar .bs-bars { width:100%; float:none !important; }
-#provisioner-app #bulkReportsSection .fixed-table-toolbar .search { max-width:100%; margin:0 0 10px; }
+#provisioner-app #bulkReportsSection code { padding:2px 6px; border:1px solid #d9e0e6; border-radius:3px; background:#f1f5f9; color:#334155; font-size:12px; }
+#provisioner-app #bulkReportsSection .fixed-table-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 12px; margin:0 0 10px; }
+#provisioner-app #bulkReportsSection .fixed-table-toolbar::after { display:none; }
+#provisioner-app #bulkReportsSection .fixed-table-toolbar .bs-bars { flex:1 1 auto; width:auto; float:none !important; margin:0; }
+#provisioner-app #bulkReportsSection .fixed-table-toolbar .search { flex:0 0 auto; max-width:100%; margin:0; float:none !important; }
 #provisioner-app #bulkReportsSection .fixed-table-toolbar .search input { min-height:32px; width:260px; max-width:100%; }
 #provisioner-app .bulk-report-history-table,
 #provisioner-app .bulk-report-table { margin:0; }
 #provisioner-app .bulk-report-history-table th,
 #provisioner-app .bulk-report-history-table td,
 #provisioner-app .bulk-report-table th,
-#provisioner-app .bulk-report-table td { vertical-align:top; overflow-wrap:anywhere; }
+#provisioner-app .bulk-report-table td { vertical-align:middle; overflow-wrap:anywhere; }
+#provisioner-app .bulk-report-table > tbody > tr.detail-view > td { padding:10px 12px; background:#f1f5f8; border-top:0; }
 #provisioner-app .bulk-report-history-table .bulk-report-open { white-space:nowrap; }
 #provisioner-app .bulk-report-meta { display:block; margin-top:4px; color:#5b6570; }
-#provisioner-app .bulk-status { display:inline-block; padding:3px 6px; border-radius:3px; font-size:12px; font-weight:600; }
-#provisioner-app .bulk-status.complete { color:#2e6b30; background:#eff8ef; }
-#provisioner-app .bulk-status.in-progress { color:#287da8; background:#eef8fc; }
-#provisioner-app .bulk-status.attention { color:#8a6d3b; background:#fcf8e3; }
-#provisioner-app .bulk-status.neutral { color:#5b6570; background:#f1f3f5; }
+#provisioner-app .bulk-status { display:inline-block; padding:3px 8px; border-radius:3px; font-size:12px; font-weight:600; border:1px solid transparent; }
+#provisioner-app .bulk-status.complete { color:#2e6b30; background:#eff8ef; border-color:#c3e6cb; }
+#provisioner-app .bulk-status.in-progress { color:#1d6fa5; background:#eef8fc; border-color:#bee5eb; }
+#provisioner-app .bulk-status.attention { color:#8a6d3b; background:#fcf8e3; border-color:#faebcc; }
+#provisioner-app .bulk-status.neutral { color:#5b6570; background:#f1f3f5; border-color:#d9e0e6; }
 #provisioner-app .bulk-report-panel { margin-top:12px; }
-#provisioner-app .bulk-report-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin:12px 0 8px; }
+#provisioner-app .bulk-report-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin:10px 0 12px; padding:12px 16px; border:1px solid #d9e0e6; border-left:4px solid #4c9471; border-radius:4px; background:#f8fafb; }
+#provisioner-app .bulk-report-header.is-attention { border-left-color:#f0ad4e; }
+#provisioner-app .bulk-report-header.is-progress { border-left-color:#287da8; }
 #provisioner-app .bulk-report-title { min-width:0; }
-#provisioner-app .bulk-report-title h4 { margin:0 0 5px; font-size:18px; }
-#provisioner-app .bulk-report-title small { color:#5b6570; }
+#provisioner-app .bulk-report-title h4 { margin:0 0 4px; font-size:17px; font-weight:600; color:#253545; }
+#provisioner-app .bulk-report-title small { color:#5b6570; font-size:12px; }
+#provisioner-app .bulk-report-header-status { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+#provisioner-app .bulk-report-poll-status { color:#5b6570; font-size:12px; display:inline-flex; align-items:center; gap:5px; }
+#provisioner-app .bulk-report-poll-status.is-error { color:#a94442; }
 #provisioner-app .bulk-report-kind { margin-right:5px; }
 #provisioner-app .bulk-report-links { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:0 0 10px; color:#5b6570; }
-#provisioner-app .bulk-report-summary { margin-bottom:8px; }
+#provisioner-app .bulk-report-summary { display:grid; grid-template-columns:repeat(4, minmax(130px, 1fr)); gap:10px; margin:0 0 12px; }
+#provisioner-app .bulk-report-summary .provisioner-summary-card { display:flex; flex-direction:column; align-items:flex-start; justify-content:center; padding:10px 14px; margin:0; border:1px solid #d9e0e6; border-left:4px solid #6c757d; border-radius:4px; background:#fff; cursor:pointer; text-align:left; transition:background-color .12s ease, border-color .12s ease, box-shadow .12s ease; }
+#provisioner-app .bulk-report-summary .provisioner-summary-card:hover,
+#provisioner-app .bulk-report-summary .provisioner-summary-card:focus { background:#f8fafb; box-shadow:0 1px 3px rgba(0,0,0,.06); outline:none; }
+#provisioner-app .bulk-report-summary .provisioner-summary-card.is-active { background:#f3f9fc; border-color:#337ab7; box-shadow:0 1px 4px rgba(51,122,183,.15); }
+#provisioner-app .bulk-report-summary .provisioner-summary-card.summary-completed { border-left-color:#5cb85c; }
+#provisioner-app .bulk-report-summary .provisioner-summary-card.summary-progress { border-left-color:#287da8; }
+#provisioner-app .bulk-report-summary .provisioner-summary-card.summary-attention { border-left-color:#f0ad4e; }
+#provisioner-app .bulk-report-summary .provisioner-summary-card strong { display:block; font-size:18px; font-weight:700; color:#253545; line-height:1.15; margin:0 0 2px; }
+#provisioner-app .bulk-report-summary .provisioner-summary-card small { font-size:12px; color:#5b6570; }
+#provisioner-app .bulk-report-subnav-bar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; margin:0 0 12px; padding:8px 12px; border:1px solid #d9e0e6; border-radius:4px; background:#f8fafb; }
+#provisioner-app .bulk-report-view-switcher .btn { font-weight:600; color:#4b5563; background:#fff; border-color:#cbd5e1; }
+#provisioner-app .bulk-report-view-switcher .btn.active { color:#1d4e78; background:#eaf4fb; border-color:#337ab7; box-shadow:inset 0 -2px 0 #337ab7; }
+#provisioner-app .bulk-report-view-switcher .btn .badge { margin-left:4px; background:#e2e8f0; color:#253545; }
+#provisioner-app .bulk-report-view-switcher .btn.active .badge { background:#337ab7; color:#fff; }
+#provisioner-app .bulk-overview-section-title { margin:0 0 8px; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; color:#4b5563; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+#provisioner-app .bulk-overview-section-title small { text-transform:none; letter-spacing:normal; font-weight:normal; color:#5b6570; font-size:12px; }
+#provisioner-app .bulk-overview-funnel { display:grid; grid-template-columns:repeat(auto-fit, minmax(175px, 1fr)); gap:10px; margin:0 0 14px; }
+#provisioner-app .bulk-funnel-card { padding:12px 14px; border:1px solid #d9e0e6; border-top:3px solid #cbd5e1; border-radius:4px; background:#fff; display:flex; flex-direction:column; gap:6px; min-width:0; text-align:left; cursor:pointer; transition:border-color .12s ease, box-shadow .12s ease, background-color .12s ease; }
+#provisioner-app .bulk-funnel-card:hover,
+#provisioner-app .bulk-funnel-card:focus { background:#f8fafb; border-color:#94a3b8; box-shadow:0 1px 4px rgba(0,0,0,.06); outline:none; }
+#provisioner-app .bulk-funnel-card.is-done { border-top-color:#5cb85c; }
+#provisioner-app .bulk-funnel-card.is-active { border-top-color:#287da8; }
+#provisioner-app .bulk-funnel-card.is-failed { border-top-color:#f0ad4e; }
+#provisioner-app .bulk-funnel-head { display:flex; align-items:baseline; justify-content:space-between; gap:6px; }
+#provisioner-app .bulk-funnel-step { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; color:#5b6570; }
+#provisioner-app .bulk-funnel-pct { font-size:12px; font-weight:700; color:#253545; }
+#provisioner-app .bulk-funnel-count { font-size:18px; font-weight:700; color:#253545; line-height:1.15; }
+#provisioner-app .bulk-funnel-count small { font-size:12px; font-weight:normal; color:#5b6570; margin-left:3px; }
+#provisioner-app .bulk-funnel-bar { display:flex; width:100%; height:7px; border-radius:4px; background:#e9ecef; overflow:hidden; margin:2px 0; }
+#provisioner-app .bulk-funnel-bar > span { display:block; height:100%; }
+#provisioner-app .bulk-funnel-bar .bar-done { background:#5cb85c; }
+#provisioner-app .bulk-funnel-bar .bar-active { background:#287da8; }
+#provisioner-app .bulk-funnel-bar .bar-failed { background:#d9534f; }
+#provisioner-app .bulk-funnel-meta { display:flex; flex-wrap:wrap; gap:4px 10px; font-size:11px; color:#5b6570; }
+#provisioner-app .bulk-funnel-meta .is-done { color:#2e6b30; font-weight:600; }
+#provisioner-app .bulk-funnel-meta .is-active { color:#1d6fa5; font-weight:600; }
+#provisioner-app .bulk-funnel-meta .is-failed { color:#a94442; font-weight:600; }
+#provisioner-app .bulk-funnel-meta .is-muted { color:#6c757d; }
+#provisioner-app .bulk-overview-grid { display:grid; grid-template-columns:minmax(0, 1.35fr) minmax(0, 1fr); gap:14px; margin:0 0 12px; }
+#provisioner-app .bulk-overview-card { padding:14px 16px; border:1px solid #d9e0e6; border-radius:4px; background:#fff; min-width:0; }
+#provisioner-app .bulk-overview-card h5 { margin:0 0 10px; padding-bottom:8px; border-bottom:1px solid #eef2f5; font-size:14px; font-weight:600; color:#253545; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+#provisioner-app .bulk-overview-list { display:flex; flex-direction:column; gap:8px; margin:0; padding:0; list-style:none; }
+#provisioner-app .bulk-overview-item { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; padding:9px 11px; border:1px solid #e2e8f0; border-left:3px solid #94a3b8; border-radius:4px; background:#f8fafb; }
+#provisioner-app .bulk-overview-item.is-attention { border-left-color:#f0ad4e; background:#fffdf8; }
+#provisioner-app .bulk-overview-item.is-progress { border-left-color:#287da8; background:#f6fbfe; }
+#provisioner-app .bulk-overview-item.is-completed { border-left-color:#5cb85c; background:#f9fdf9; }
+#provisioner-app .bulk-overview-item-body { min-width:0; flex:1 1 auto; }
+#provisioner-app .bulk-overview-item-title { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; font-weight:600; color:#253545; font-size:13px; }
+#provisioner-app .bulk-overview-item-desc { display:block; margin-top:3px; font-size:12px; color:#5b6570; overflow-wrap:anywhere; }
+#provisioner-app .bulk-overview-item-samples { display:block; margin-top:3px; font-size:11px; color:#64748b; }
+#provisioner-app .bulk-overview-item-actions { flex:0 0 auto; display:flex; align-items:center; gap:6px; white-space:nowrap; }
+#provisioner-app .bulk-overview-kv { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px 12px; margin:0 0 12px; padding-bottom:12px; border-bottom:1px solid #eef2f5; }
+#provisioner-app .bulk-overview-kv-item { padding:7px 10px; border:1px solid #e2e8f0; border-radius:3px; background:#f8fafb; min-width:0; }
+#provisioner-app .bulk-overview-kv-item small { display:block; font-size:11px; color:#5b6570; }
+#provisioner-app .bulk-overview-kv-item strong { display:block; font-size:13px; color:#253545; overflow-wrap:anywhere; margin-top:1px; }
+#provisioner-app .bulk-overview-subtable { width:100%; margin:0 0 10px; font-size:12px; }
+#provisioner-app .bulk-overview-subtable th,
+#provisioner-app .bulk-overview-subtable td { padding:5px 6px; border-bottom:1px solid #eef2f5; vertical-align:middle; }
+#provisioner-app .bulk-overview-subtable th { color:#5b6570; font-weight:600; font-size:11px; text-transform:uppercase; }
+#provisioner-app .bulk-report-stage-chip { display:inline-flex; align-items:center; gap:6px; padding:4px 9px; border:1px solid #bee5eb; border-radius:3px; background:#eef8fc; color:#1d6fa5; font-size:12px; font-weight:600; }
 #provisioner-app .bulk-report-table { width:100%; min-width:0; }
+#provisioner-app .bulk-report-result-top { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; }
+#provisioner-app .bulk-report-inline-stages { display:inline-flex; flex-wrap:wrap; align-items:center; gap:3px 6px; padding:2px 7px; border:1px solid #e2e8f0; border-radius:3px; background:#f8fafb; }
+#provisioner-app .bulk-report-result-reason,
+#provisioner-app .bulk-report-result-next { display:block; margin-top:4px; max-width:520px; white-space:normal; overflow-wrap:anywhere; color:#5b6570; line-height:1.35; }
+#provisioner-app .bulk-report-result-next { color:#374151; }
+#provisioner-app .bulk-report-row-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+#provisioner-app .bulk-report-recovery-help { margin-top:10px; }
+#provisioner-app .bulk-report-recovery-help summary { cursor:pointer; font-weight:600; }
+#provisioner-app .bulk-report-recovery-help ol { margin-top:8px; padding-left:22px; }
 #provisioner-app .bulk-report-table .bulk-report-phone code,
 #provisioner-app .bulk-report-table .bulk-report-target code { overflow-wrap:anywhere; word-break:break-word; }
-#provisioner-app .bulk-report-detail { padding:10px; background:#f8fafb; overflow-wrap:anywhere; }
-#provisioner-app .bulk-report-detail h5 { margin:0 0 8px; font-weight:600; }
+#provisioner-app .bulk-report-detail { padding:12px 16px; border:1px solid #d9e0e6; border-left:4px solid #4c9471; border-radius:4px; background:#fff; overflow-wrap:anywhere; box-shadow:0 1px 2px rgba(0,0,0,.03); }
+#provisioner-app .bulk-report-detail.is-attention { border-left-color:#f0ad4e; }
+#provisioner-app .bulk-report-detail.is-progress { border-left-color:#287da8; }
+#provisioner-app .bulk-report-detail-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin:0 0 10px; padding-bottom:8px; border-bottom:1px solid #eef2f5; }
+#provisioner-app .bulk-report-detail h5 { margin:0; font-size:14px; font-weight:600; color:#253545; }
 #provisioner-app .bulk-report-detail p { margin:8px 0 0; }
+#provisioner-app .bulk-report-stage-cards { display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); gap:10px; margin:10px 0; }
+#provisioner-app .bulk-report-stage-card { padding:9px 11px; border:1px solid #d9e0e6; border-top:3px solid #cbd5e1; border-radius:3px; background:#f8fafb; display:flex; flex-direction:column; gap:3px; min-width:0; }
+#provisioner-app .bulk-report-stage-card.is-done { border-top-color:#5cb85c; background:#fff; }
+#provisioner-app .bulk-report-stage-card.is-failed { border-top-color:#d9534f; background:#fffafa; }
+#provisioner-app .bulk-report-stage-card.is-active { border-top-color:#287da8; background:#f4fafe; }
+#provisioner-app .bulk-report-stage-step { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.02em; color:#5b6570; }
+#provisioner-app .bulk-report-stage-meta { font-size:11px; color:#5b6570; line-height:1.3; }
+#provisioner-app .bulk-report-meta-strip { display:flex; flex-wrap:wrap; align-items:center; gap:6px 18px; margin-top:10px; padding-top:8px; border-top:1px solid #eef2f5; font-size:12px; color:#5b6570; }
+#provisioner-app .bulk-report-meta-strip strong { color:#354555; }
 #provisioner-app .bulk-report-detail-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px; margin-top:12px; }
 #provisioner-app .bulk-report-detail dl { display:grid; grid-template-columns:minmax(90px, 130px) minmax(0, 1fr); gap:5px 12px; margin:0; }
 #provisioner-app .bulk-report-detail dt,
@@ -116,6 +206,11 @@ $moduleName = 'provisioner';
   #provisioner-app .phone-status-toolbar-actions { width:100%; justify-content:flex-start; }
   #provisioner-app .phone-status-toolbar .action-button { flex:1 1 auto; }
   #provisioner-app .bulk-input-grid { grid-template-columns:1fr; }
+  #provisioner-app .bulk-report-summary { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  #provisioner-app .bulk-overview-funnel { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  #provisioner-app .bulk-overview-grid { grid-template-columns:1fr; }
+  #provisioner-app .bulk-overview-kv { grid-template-columns:1fr; }
+  #provisioner-app .bulk-report-stage-cards { grid-template-columns:repeat(2, minmax(0, 1fr)); }
   #provisioner-app .bulk-report-detail-grid { grid-template-columns:1fr; }
   #provisioner-app .bulk-report-control-group { justify-content:flex-start; }
   #provisioner-app #bulkReportsSection .fixed-table-toolbar .search { float:none !important; width:100%; }
@@ -307,25 +402,28 @@ $moduleName = 'provisioner';
     <!-- ===================== MAC MAPPING TAB ===================== -->
     <div class="tab-pane display" id="devices" role="tabpanel">
       <div class="alert alert-info">Assign extensions, brands, and network settings to phone MAC addresses.</div>
+      <div id="mappingReportReturn" class="bulk-report-controls" style="display:none; margin-bottom:12px; padding:10px 12px; border:1px solid #bee5eb; border-radius:4px; background:#eef8fc;">
+        <span id="mappingReportHint" style="color:#1d6fa5; font-size:13px;"></span>
+        <button type="button" class="btn btn-default btn-sm" id="returnToMappingReportBtn"><i class="fa fa-file-text-o"></i> Return to Batch Report</button>
+      </div>
       <div class="row" style="margin-top:20px;">
         <div class="col-md-12">
           <div class="table-responsive">
               <div id="deviceToolbar" class="device-toolbar">
                 <button class="btn btn-add btn-sm" id="addDeviceBtn" title="Manually add a device to MAC Mapping"><i class="fa fa-plus"></i> Add Device</button>
                 <button class="btn btn-success btn-sm" id="autoAssignBtn" title="Auto-assign next available extension to devices without one"><i class="fa fa-magic"></i> Auto-Assign</button>
-                <button class="btn btn-danger btn-sm" id="deleteSelectedBtn" disabled title="Delete selected devices from MAC Mapping"><i class="fa fa-trash"></i> Delete Mappings</button>
+                <button class="btn btn-danger btn-sm" id="deleteSelectedBtn" disabled title="Delete selected devices from MAC Mapping"><i class="fa fa-trash"></i> Delete</button>
                 <button class="btn btn-secondary btn-sm" id="discardAllBtn" style="display:none;" title="Discard all pending changes on all devices">
                   <i class="fa fa-undo"></i> Discard All
                 </button>
-                <button class="btn btn-default btn-sm action-button" id="applyChangesBtn" disabled title="Select device(s) to push, or wait for a push issue to retry">
+                <button class="btn btn-default btn-sm action-button" id="applyChangesBtn" disabled title="Select mappings to push. Missing handset identity is explained in Batch Reports.">
                   <i class="fa fa-paper-plane"></i> <span class="push-action-label">Push Config</span> <span id="pendingBadge" class="badge badge-light" style="display:none;">0</span>
                 </button>
               </div>
               <table id="devicesTable"
                      data-url="ajax.php?module=provisioner&amp;command=getDeviceGrid"
                      data-toolbar="#deviceToolbar"
-                     data-toggle="table"
-                     data-pagination="true"
+                      data-pagination="true"
                      data-search="true"
                      data-unique-id="id"
                      data-maintain-meta-data="true"
@@ -357,7 +455,6 @@ $moduleName = 'provisioner';
           <ul class="nav nav-tabs bulk-handler-nav" role="tablist">
             <li role="presentation" class="active"><a href="#bulkImportSection" class="bulk-pill active">Import</a></li>
             <li role="presentation"><a href="#bulkExportSection" class="bulk-pill">Export</a></li>
-            <li role="presentation"><a href="#bulkReportsSection" class="bulk-pill" id="batchHistoryTab">Batch Reports</a></li>
           </ul>
 
           <div id="bulkImportSection" class="bulk-handler-section">
@@ -424,66 +521,6 @@ $moduleName = 'provisioner';
             </div>
           </div>
 
-          <div id="bulkReportsSection" class="bulk-handler-section" style="display:none;">
-            <div id="batchHistoryView">
-              <div class="bulk-section-header">
-                <h3>Batch Reports</h3>
-                <p>Review saved imports and pushes. Search by date, type, status, or phone.</p>
-              </div>
-              <div id="batchHistoryMessage" class="bulk-report-message" role="status" aria-live="polite" style="display:none;">
-                <span id="batchHistoryMessageText"></span>
-                <button type="button" class="btn btn-default" id="reloadBatchHistoryBtn" style="display:none;"><i class="fa fa-refresh"></i> Try Again</button>
-              </div>
-              <div id="batchHistoryToolbar" class="bulk-report-toolbar">
-                <div class="bulk-report-controls">
-                  <div id="batchHistorySummary" class="provisioner-summary-group" aria-live="polite"></div>
-                  <button type="button" class="btn btn-default" id="refreshBatchHistoryBtn"><i class="fa fa-refresh"></i> Refresh</button>
-                </div>
-              </div>
-              <div id="batchHistoryResults" class="table-responsive">
-                <table id="batchHistoryTable" class="table table-striped bulk-report-history-table" aria-label="Saved batch reports"></table>
-              </div>
-            </div>
-            <div id="batchReportResults" class="bulk-report-panel" style="display:none;" aria-busy="false">
-              <button type="button" class="btn btn-default" id="backToBatchHistoryBtn"><i class="fa fa-arrow-left"></i> Back to Reports</button>
-              <div id="batchReportMessage" class="bulk-report-message" role="status" aria-live="polite" style="display:none;">
-                <span id="batchReportMessageText"></span>
-                <button type="button" class="btn btn-default" id="reloadBatchReportBtn" style="display:none;"><i class="fa fa-refresh"></i> Try Again</button>
-              </div>
-              <div id="batchReportContent" style="display:none;">
-                <div class="bulk-report-header">
-                  <div class="bulk-report-title">
-                    <h4 id="batchReportTitle"></h4>
-                    <small id="batchReportMeta"></small>
-                  </div>
-                  <span id="batchReportStatus" class="bulk-status neutral"></span>
-                </div>
-                <div id="batchReportSummary" class="provisioner-summary-group bulk-report-summary" aria-live="polite"></div>
-                <div id="batchReportLinks" class="bulk-report-links" style="display:none;"></div>
-                <div id="batchReportToolbar" class="bulk-report-toolbar">
-                  <div class="bulk-report-controls">
-                    <div class="bulk-report-control-group">
-                      <label for="batchReportFilter">Show</label>
-                      <select id="batchReportFilter" class="form-control input-sm provisioner-filter-select" aria-label="Filter report phones">
-                        <option value="all">All Phones</option>
-                        <option value="attention">Needs Attention</option>
-                        <option value="progress">In Progress</option>
-                        <option value="completed">Completed</option>
-                      </select>
-                    </div>
-                    <div class="bulk-report-control-group">
-                      <button type="button" class="btn btn-default" id="refreshBatchReportBtn"><i class="fa fa-refresh"></i> Refresh</button>
-                      <button type="button" class="btn btn-default" id="downloadBatchCsvBtn"><i class="fa fa-download"></i> Download CSV</button>
-                      <button type="button" class="btn btn-warning" id="retryBatchBtn" disabled title="Retry eligible phones in this batch, including required swap partners"><i class="fa fa-repeat"></i> Retry Eligible Phones <span id="retryBatchCount" class="badge">0</span></button>
-                    </div>
-                  </div>
-                </div>
-                <div class="table-responsive">
-                  <table id="batchReportTable" class="table table-striped bulk-report-table" aria-label="Phones in this batch"></table>
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -533,7 +570,13 @@ $moduleName = 'provisioner';
                 </select>
               </div>
               <div id="discoveryScanBox">
+                <div id="discoveryPushHint" class="alert alert-info" style="display:none;" role="status"></div>
+                <div id="discoveryReportReturn" class="bulk-report-controls" style="display:none; margin-bottom:12px;">
+                  <button type="button" class="btn btn-default" id="returnToDiscoveryReportBtn"><i class="fa fa-file-text-o"></i> Return to Batch Report</button>
+                  <button type="button" class="btn btn-default" id="discoveryReportPhoneStatusBtn"><i class="fa fa-phone"></i> Open Phone Status</button>
+                </div>
                 <div id="scanStatus" style="display:none;margin-bottom:8px;"></div>
+                <div id="callbackTestResult" style="display:none; margin-bottom:8px;" role="status" aria-live="polite"></div>
                 <div id="discoveredToolbar">
                   <button class="btn btn-add" id="addSelectedDiscoveryBtn" disabled title="Add selected devices to MAC Mapping for provisioning">
                     <i class="fa fa-plus"></i> Add
@@ -544,6 +587,7 @@ $moduleName = 'provisioner';
                   <button class="btn btn-info" id="identifyMacBtn" disabled style="display:none;" title="Identify selected unknown SIP IPs through a URL-only NOTIFY. The receiver returns 404 and serves no configuration.">
                     <i class="fa fa-search-plus"></i> Identify MAC
                   </button>
+                  <button type="button" class="btn btn-default" id="testDiscoveryCallbackBtn" title="Check the PBX identity receiver without contacting or changing phones"><i class="fa fa-stethoscope"></i> Test Callback Access</button>
                 <span id="scanSubnetRow" style="display:none;margin-left:10px;font-size:14px;font-weight:normal;">
                   Interface: <select id="scan-interface-select" class="form-control" style="width:auto;display:inline-block;margin-right:10px;">
                     <option value="">— Select interface —</option>
@@ -601,9 +645,6 @@ $moduleName = 'provisioner';
                   <i class="fa fa-undo"></i> Revert Config</button>
                 <button class="btn btn-danger" id="deleteSelectedConfigBtn" disabled title="Delete selected config files from the server">
                   <i class="fa fa-trash"></i> Delete</button>
-                <button class="btn btn-danger float-right" id="deleteAllConfigBtn" title="Delete all generated config files on the server">
-                  <i class="fa fa-trash"></i> Delete All
-                </button>
               </div>
               <table id="configFilesTable"
                      data-url="ajax.php?module=provisioner&amp;command=getConfigFileGrid"
@@ -637,9 +678,22 @@ $moduleName = 'provisioner';
     <!-- ===================== LOGS TAB ===================== -->
     <div class="tab-pane display" id="logs" role="tabpanel">
       <div class="row" style="margin-top:20px;">
-        <div class="col-md-12">
+        <div class="col-sm-12">
+          <ul class="nav nav-tabs bulk-handler-nav" role="tablist" aria-label="Logs views">
+            <li role="presentation" class="active"><a href="#activityLogsSection" class="logs-pill active">Activity Logs</a></li>
+            <li role="presentation"><a href="#bulkReportsSection" class="logs-pill" id="batchHistoryTab">Batch Reports</a></li>
+          </ul>
+          <?php include __DIR__ . '/batch_reports.php'; ?>
+          <div id="activityLogsSection" class="logs-section">
+            <div class="bulk-section-header">
+              <h3>Activity Logs</h3>
+              <p>Review provisioning, discovery, configuration pull, and push activity.</p>
+            </div>
+            <div id="activityLogsError" class="alert alert-danger" role="alert" style="display:none;">
+              Could not load activity logs. Previously loaded rows may be out of date.
+              <button type="button" class="btn btn-default btn-sm" id="retryActivityLogsBtn">Try Again</button>
+            </div>
           <div class="table-responsive">
-              <div class="alert alert-info">Review provisioning, discovery, configuration pull, and push activity.</div>
               <div id="logsToolbar">
                 <button class="btn btn-danger" id="clearLogsBtn">
                   <i class="fa fa-trash"></i> Clear Logs
@@ -648,11 +702,10 @@ $moduleName = 'provisioner';
               <table id="logsTable"
                      data-url="ajax.php?module=provisioner&amp;command=getLogGrid"
                      data-toolbar="#logsToolbar"
-                     data-toggle="table"
-                     data-pagination="true"
-                     data-search="true"
-                     data-cookie="true"
-                     data-cookie-id-table="provisioner-logs"
+                      data-pagination="true"
+                      data-search="true"
+                      data-cookie="true"
+                      data-cookie-id-table="provisioner-logs"
                      class="table table-striped">
                 <thead>
                   <tr>
@@ -665,6 +718,7 @@ $moduleName = 'provisioner';
               </table>
           </div>
         </div>
+      </div>
       </div>
     </div>
 
@@ -722,8 +776,26 @@ $moduleName = 'provisioner';
                     <input type="text" class="form-control" id="settingsScanSubnets" name="scan_subnets" placeholder="192.168.0.0/24, 10.10.0.0/16">
                     <span class="input-group-btn"><button type="button" class="btn btn-default" id="detectScanSubnetBtn"><i class="fa fa-crosshairs"></i> Auto-Detect</button></span>
                   </div>
-                  <small class="form-text text-muted" id="settingsScanDetection">Detecting subnet from the selected PBX interface...</small>
+                  <p class="help-block" id="settingsScanDetection">Detecting subnet from the selected PBX interface...</p>
                 </div>
+                <details id="settingsPushAdvanced" class="bulk-report-recovery-help">
+                  <summary>Advanced settings</summary>
+                  <p class="help-block">Optional rollout tuning and approved automatic search networks. Existing values apply while this section is closed.</p>
+                  <div class="form-group">
+                  <label for="settingsRolloutWaveSize">Phones per wave</label>
+                  <input type="number" class="form-control" id="settingsRolloutWaveSize" name="rollout_wave_size" min="1" max="30" value="25" aria-describedby="settingsRolloutWaveHelp">
+                  <p id="settingsRolloutWaveHelp" class="help-block">How many phones are processed together (1–30; default 25). Selecting 300 phones with 25 per wave creates 12 groups. The next group starts only after the current group verifies; an incomplete group stops for review. Extension-swap partners stay together, so the limit must fit the whole swap group.</p>
+                  <label for="settingsRolloutSettleSeconds">Wait after config downloads (seconds)</label>
+                  <input type="number" class="form-control" id="settingsRolloutSettleSeconds" name="rollout_settle_seconds" min="5" max="120" value="20" aria-describedby="settingsRolloutSettleHelp">
+                  <p id="settingsRolloutSettleHelp" class="help-block">Extra pause after a wave's downloads, before checking final registration, MAC and IP. This gives phones time to apply settings and register again (5–120 seconds; default 20). Verification can keep waiting after this pause; this is not the overall verification timeout.</p>
+                  <label for="settingsPushSearchSubnets">Networks allowed for automatic phone search</label>
+                  <input type="text" class="form-control" id="settingsPushSearchSubnets" name="push_search_subnets" placeholder="Optional: 192.168.188.0/24" aria-describedby="settingsPushSearchHelp settingsPushSearchExample">
+                  <p id="settingsPushSearchHelp" class="help-block">Fallback search area for Push Config when known phone IPs do not identify the handset. Leave blank to try known IPs only. This does not change phone IP settings or start a search when saved.</p>
+                  <p id="settingsPushSearchExample" class="help-block">Example: <code>192.168.188.0/24</code> allows searching <code>192.168.188.1–254</code>. Enter the phone network you want searched, not automatically the PBX network.</p>
+                  <details class="bulk-report-recovery-help"><summary>Search format, limits and safety</summary><p class="help-block">Use CIDR notation; separate up to two private IPv4 ranges with commas. Each range must be /22 or smaller. No subnet mask is guessed. Searching may identify other supported responders in the allowed range, but unselected phones are never provisioned.</p></details>
+                  <div id="pushSearchReportReturn" style="display:none;"><button type="button" class="btn btn-default" id="pushSearchReturnToReportBtn">Return to Batch Report</button><p class="help-block">Save the range, return to the report and use Try Finding Again. Nothing resumes or pushes automatically.</p></div>
+                  </div>
+                </details>
                 <div class="form-group" id="settingsDhcpLeasesRow">
                   <label for="settingsDhcpLeasesFile">DHCP Leases File</label>
                   <input type="text" class="form-control" id="settingsDhcpLeasesFile" name="dhcp_leases_file" placeholder="/var/lib/misc/dnsmasq.leases">
@@ -943,8 +1015,16 @@ $moduleName = 'provisioner';
           <div id="deviceDiagnosticsBody">
             <p class="text-muted">Loading diagnostics...</p>
           </div>
+          <div id="diagnosticCopyFallback" style="display:none; margin-top:12px;">
+            <label for="diagnosticCopyText">Diagnostic summary — select and copy</label>
+            <textarea id="diagnosticCopyText" class="form-control" rows="10" readonly></textarea>
+          </div>
+          <div id="manualVerificationNotice" class="alert alert-info" style="display:none;" role="status"></div>
+          <p id="diagnosticCopyStatus" class="text-muted" role="status" aria-live="polite"></p>
         </div>
         <div class="modal-footer">
+          <button type="button" class="btn btn-default" id="copyDiagnosticSummaryBtn" disabled><i class="fa fa-copy"></i> Copy Diagnostic Summary</button>
+          <button type="button" class="btn btn-info" id="diagnosticDiscoveryBtn" style="display:none;"><i class="fa fa-search"></i> Open Device Discovery</button>
           <button type="button" class="btn btn-warning" id="verifyPushStatusBtn" style="display:none;"><i class="fa fa-search"></i> Verify Last Push</button>
           <button type="button" class="btn btn-info" id="runFreshDiagnosticsBtn"><i class="fa fa-refresh"></i> Run Fresh ARP Check</button>
           <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
@@ -963,6 +1043,7 @@ $moduleName = 'provisioner';
           <button type="button" class="close" data-dismiss="modal">&times;</button>
         </div>
         <div class="modal-body">
+          <p class="alert alert-info">This job checks handset identity before delivery. Routed phones without matching evidence may receive SIP probes and an identification-only callback request. Wider discovery uses only approved automatic search ranges and may identify other responders; it never provisions unselected phones. Local ARP is a best-effort refresh, not a new push requirement.</p>
           <p id="applyCountDesc">Push config for <strong id="applyCount">0</strong> device(s) with pending changes.</p>
           <p id="applySelectedDesc" style="display:none;"><span id="applySelectedActionVerb">Push config for</span> <strong id="applySelectedCount">0</strong> selected <span id="applySelectedUnit">phones</span>. Pending or missing configs are generated first; extension-swap partners are included automatically.</p>
           <p id="applyNoChangesDesc" style="display:none;">Push config to all active phones (no pending changes).</p>
@@ -990,6 +1071,7 @@ $moduleName = 'provisioner';
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-primary" id="applyOkBtn"><i class="fa fa-paper-plane"></i> Push Config</button>
+          <button type="button" class="btn btn-warning" id="retryDeliveryFailuresBtn" style="display:none;">Retry Delivery Failures</button>
         </div>
       </div>
     </div>

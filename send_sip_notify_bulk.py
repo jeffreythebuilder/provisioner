@@ -108,7 +108,9 @@ def main():
         phones = json.load(f)
 
     results = {}
-    with ThreadPoolExecutor(max_workers=50) as executor:
+    # The durable PHP worker controls the rollout wave; this is only the
+    # transport concurrency inside that wave, never a reboot/in-flight cap.
+    with ThreadPoolExecutor(max_workers=min(10, max(1, len(phones)))) as executor:
         futures = {executor.submit(send_notify_to_phone, p): p for p in phones}
         for future in as_completed(futures):
             r = future.result()

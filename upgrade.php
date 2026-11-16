@@ -1,13 +1,21 @@
 <?php
 global $db;
-$version = '1.4.41';
-$rawname = 'provisioner';
-
-// Same approach as install.php — write to BOTH connections
-$sql = "DELETE FROM modules WHERE modulename='$rawname'";
-$db->query($sql);
-\FreePBX::Database()->exec($sql);
-$sql = "INSERT INTO modules (modulename, version, enabled) SELECT '$rawname', '$version', 1 WHERE NOT EXISTS (SELECT 1 FROM modules WHERE modulename='$rawname')";
-$db->query($sql);
-\FreePBX::Database()->exec($sql);
-\FreePBX::Database()->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_SILENT);
+require_once __DIR__ . '/lib/ActiveArp.php';
+\FreePBX\modules\Provisioner\ActiveArp::install();
+require_once __DIR__ . '/lib/PushJobSchema.php';
+\FreePBX\modules\Provisioner\PushJobSchema::install(\FreePBX::Database());
+require_once __DIR__ . '/lib/RolloutSchema.php';
+\FreePBX\modules\Provisioner\RolloutSchema::install(\FreePBX::Database());
+\FreePBX\modules\Provisioner\RolloutSchema::schedule(\FreePBX::Cron(), __DIR__);
+require_once __DIR__ . '/lib/ReceiverAccess.php';
+\FreePBX\modules\Provisioner\ReceiverAccess::install(__DIR__);
+if (\FreePBX::Database()->exec("DELETE FROM provisioner_settings WHERE key_name='force_push_without_mac'") === false) {
+    throw new \RuntimeException('Could not remove the retired force-push setting.');
+}
+// Leave registration/version/enabled state to Module Admin. Consolidate only
+// duplicates created by older hooks; do not delete the final existing row.
+$connection=\FreePBX::Database();
+$count=(int)$connection->query("SELECT COUNT(*) FROM modules WHERE modulename='provisioner'")->fetchColumn();
+if ($count>1 && $connection->exec("DELETE FROM modules WHERE modulename='provisioner' LIMIT ".($count-1))===false) {
+    throw new \RuntimeException('Could not consolidate duplicate Provisioner module registration.');
+}

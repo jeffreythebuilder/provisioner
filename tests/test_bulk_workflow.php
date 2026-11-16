@@ -1,6 +1,6 @@
 <?php
 
-class BulkWorkflowFixture extends \FreePBX\modules\Provisioner {
+class BulkWorkflowFixture extends LegacyEngineFixture {
     public function getExtensions() { return [['extension'=>'200'],['extension'=>'201'],['extension'=>'2000']]; }
 }
 

@@ -5,12 +5,22 @@ namespace FreePBX\modules;
 require_once __DIR__ . '/lib/LiveStatus.php';
 require_once __DIR__ . '/lib/SipDiscovery.php';
 require_once __DIR__ . '/lib/BulkWorkflow.php';
+require_once __DIR__ . '/lib/PushJobSchema.php';
+require_once __DIR__ . '/lib/RolloutSchema.php';
+require_once __DIR__ . '/lib/RolloutQueue.php';
+require_once __DIR__ . '/lib/FetchLogObserver.php';
+require_once __DIR__ . '/lib/PushPreflight.php';
+require_once __DIR__ . '/lib/ActiveArp.php';
 
 class Provisioner implements \BMO {
     use \FreePBX\modules\Provisioner\BulkWorkflow;
+    use \FreePBX\modules\Provisioner\PushPreflight;
     private $db;
     private $sipTransportCache;
     private $python3BinaryCache = false;
+    private $rolloutQueueContext;
+    private $waveFetchObserver;
+    private $waveFetchObservations = [];
 
     private static $ouiMap = [
         '0004f3' => 'digium',
@@ -144,7 +154,7 @@ class Provisioner implements \BMO {
             $this->ensureBatchTables();
             // Existing installs may predate the static-value revert columns.
             $this->ensurePreviousStaticColumns();
-            $this->db->exec("CREATE TABLE IF NOT EXISTS provisioner_push_jobs (id VARCHAR(32) PRIMARY KEY, status VARCHAR(20) NOT NULL, payload TEXT NOT NULL, created_at DATETIME NOT NULL, finished_at DATETIME DEFAULT NULL, error TEXT DEFAULT NULL)");
+            $this->db->exec("CREATE TABLE IF NOT EXISTS provisioner_push_jobs (id VARCHAR(32) PRIMARY KEY, status VARCHAR(20) NOT NULL, payload MEDIUMTEXT NOT NULL, created_at DATETIME NOT NULL, finished_at DATETIME DEFAULT NULL, error TEXT DEFAULT NULL)");
             $this->db->exec("CREATE TABLE IF NOT EXISTS provisioner_discovery_observations (mac_address VARCHAR(12) PRIMARY KEY, ip_address VARCHAR(45) NOT NULL UNIQUE, brand VARCHAR(50) NOT NULL, model VARCHAR(100), firmware VARCHAR(100), sip_port INTEGER DEFAULT 5060, sip_transport VARCHAR(10) DEFAULT 'udp', source VARCHAR(100), last_seen DATETIME NOT NULL)");
             if (!in_array('sip_transport', $this->getTableColumns('provisioner_discovery_observations'), true)) {
                 $this->db->exec("ALTER TABLE provisioner_discovery_observations ADD COLUMN sip_transport VARCHAR(10) DEFAULT 'udp'");
@@ -166,7 +176,9 @@ class Provisioner implements \BMO {
     }
 
     public function setSetting($key, $value) {
-        $stmt = $this->db->prepare("INSERT INTO provisioner_settings (key_name, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value=?");
+        $update = $this->db->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'sqlite'
+            ? 'ON CONFLICT(key_name) DO UPDATE SET value=?' : 'ON DUPLICATE KEY UPDATE value=?';
+        $stmt = $this->db->prepare("INSERT INTO provisioner_settings (key_name, value) VALUES (?, ?) $update");
         $stmt->execute([$key, $value, $value]);
     }
 
@@ -176,10 +188,14 @@ class Provisioner implements \BMO {
         while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
             $settings[$row['key_name']] = $row['value'];
         }
+        unset($settings['force_push_without_mac']);
         return $settings;
     }
 
     public function saveSettings($data) {
+        if (array_key_exists('force_push_without_mac', $data)) {
+            return ['success' => false, 'error' => 'Force push without MAC confirmation has been removed. Run Scan Network and Identify MAC before pushing across subnets.'];
+        }
         if (array_key_exists('scan_subnets', $data)) {
             $scanSubnets = $this->normalizeScanSubnets($data['scan_subnets']);
             if ($scanSubnets === null) {
@@ -187,12 +203,27 @@ class Provisioner implements \BMO {
             }
             $data['scan_subnets'] = implode(', ', $scanSubnets);
         }
+        if (isset($data['rollout_wave_size']) && (!ctype_digit((string)$data['rollout_wave_size']) || (int)$data['rollout_wave_size'] < 1 || (int)$data['rollout_wave_size'] > 30)) {
+            return ['success'=>false,'error'=>'Rollout wave size must be an integer from 1 to 30.'];
+        }
+        if (array_key_exists('push_search_subnets',$data)) {
+            $ranges=$this->normalizeScanSubnets($data['push_search_subnets'],32);
+            if ($ranges===null || count($ranges)>2) return ['success'=>false,'error'=>'Enter up to two approved private automatic search ranges.'];
+            foreach ($ranges as $range) if ((int)explode('/',$range)[1]<22 || !$this->isAutomaticDiscoveryIp(explode('/',$range)[0])) return ['success'=>false,'error'=>'Automatic search ranges must be private IPv4 /22 or smaller ranges.'];
+            $data['push_search_subnets']=implode(', ',$ranges);
+        }
+        if (isset($data['rollout_settle_seconds']) && (!ctype_digit((string)$data['rollout_settle_seconds']) || (int)$data['rollout_settle_seconds'] < 5 || (int)$data['rollout_settle_seconds'] > 120)) {
+            return ['success'=>false,'error'=>'Rollout settling time must be an integer from 5 to 120 seconds.'];
+        }
         $keys = ['pbx_ip', 'sip_port', 'transport', 'prov_dir', 'scan_subnets', 'phone_admin_pass', 'phone_admin_pass_alcatel', 'deploy_mode', 'vlan_id', 'vlan_data_id', 'dhcp_leases_file', 'digium_phonebook_name', 'digium_phonebook_url', 'digium_phonebook_username', 'digium_phonebook_password', 'alcatel_phonebook_name', 'alcatel_phonebook_url', 'alcatel_phonebook_username', 'alcatel_phonebook_password'];
         foreach ($keys as $key) {
             if (isset($data[$key])) {
                 $this->setSetting($key, $data[$key]);
             }
         }
+        if (isset($data['rollout_wave_size'])) $this->setSetting('rollout_wave_size',(string)(int)$data['rollout_wave_size']);
+        if (isset($data['rollout_settle_seconds'])) $this->setSetting('rollout_settle_seconds',(string)(int)$data['rollout_settle_seconds']);
+        if (isset($data['push_search_subnets'])) $this->setSetting('push_search_subnets',$data['push_search_subnets']);
         $this->addLog('settings', 'Settings updated', 'success');
         return ['success' => true];
     }
@@ -212,9 +243,24 @@ class Provisioner implements \BMO {
         return array_values(array_unique($subnets));
     }
 
+    protected function asteriskBinaryCandidates() {
+        // Cron normally omits /usr/sbin. Do not depend on its PATH, and never
+        // prefer an arbitrary executable supplied through a web/worker PATH.
+        return ['/usr/sbin/asterisk','/usr/local/sbin/asterisk','/usr/bin/asterisk','/usr/local/bin/asterisk'];
+    }
+
+    private function asteriskCliCommand($command) {
+        foreach ($this->asteriskBinaryCandidates() as $binary) {
+            if (substr($binary,0,1) === '/' && is_file($binary) && is_executable($binary)) {
+                return escapeshellarg($binary) . ' -rx ' . escapeshellarg($command);
+            }
+        }
+        throw new \RuntimeException('Asterisk CLI is unavailable at the supported absolute paths. Registration cannot be verified; review the PBX installation before retrying.');
+    }
+
     public function getSipTransportInfo() {
         if ($this->sipTransportCache !== null) return $this->sipTransportCache;
-        $output = shell_exec('asterisk -rx "pjsip show transports" 2>/dev/null');
+        $output = shell_exec($this->asteriskCliCommand('pjsip show transports') . ' 2>/dev/null');
         $all = [];
         if ($output) {
             foreach (explode("\n", $output) as $line) {
@@ -320,19 +366,21 @@ class Provisioner implements \BMO {
         return false;
     }
 
-    private function getPjsipContacts($output = null, $withIdentity = false, $registrarOutput = null) {
+    protected function getPjsipContacts($output = null, $withIdentity = false, $registrarOutput = null) {
         if ($output === null) {
-            $output = shell_exec('asterisk -rx "pjsip show contacts" 2>/dev/null');
+            $output = shell_exec($this->asteriskCliCommand('pjsip show contacts') . ' 2>/dev/null');
         }
         $contacts = [];
         $hashes = [];
         if (!$output) return $contacts;
         foreach (explode("\n", $output) as $line) {
-            if (!preg_match('/^\s*Contact:\s+([^\/\s]+)\/sip:[^@\s]+@(\d+\.\d+\.\d+\.\d+)/i', $line, $m)) continue;
+            if (!preg_match('/^\s*Contact:\s+([^\/\s]+)\/sip:[^@\s]+@(\d+\.\d+\.\d+\.\d+)(?::(\d+))?/i', $line, $m)) continue;
             $status = preg_match('/\b(Avail|Unavail)\b/i', $line, $state) ? ucfirst(strtolower($state[1])) : 'Unknown';
             $contacts[$m[1]] = [
                 'ip' => $m[2],
-                'status' => $status
+                'status' => $status,
+                'port' => isset($m[3]) && (int)$m[3]>=1 && (int)$m[3]<=65535 ? (int)$m[3] : 5060,
+                'transport' => preg_match('/;transport=(udp|tcp|tls)\b/i',$line,$transportMatch) ? strtolower($transportMatch[1]) : 'udp'
             ];
             if ($withIdentity && preg_match('/^\s*Contact:\s+\S+\s+([a-f0-9]{10,32})\s+/i', $line, $hash)) {
                 $hashes[$m[1]] = strtolower($hash[1]);
@@ -340,7 +388,7 @@ class Provisioner implements \BMO {
         }
         if ($withIdentity) {
             if ($registrarOutput === null) {
-                $registrarOutput = shell_exec('asterisk -rx "database show registrar/contact" 2>/dev/null');
+                $registrarOutput = shell_exec($this->asteriskCliCommand('database show registrar/contact') . ' 2>/dev/null');
             }
             foreach (explode("\n", (string)$registrarOutput) as $line) {
                 if (!preg_match('/^\s*\/registrar\/contact\/(.+);@([a-f0-9]{32}):\s*(\{.*\})\s*$/i', $line, $record)) continue;
@@ -349,8 +397,10 @@ class Provisioner implements \BMO {
                 $extension = (string)($data['endpoint'] ?? $record[1]);
                 if (empty($contacts[$extension]) || empty($hashes[$extension])
                     || strpos(strtolower($record[2]), $hashes[$extension]) !== 0) continue;
-                if (!preg_match('/^sip:[^@\s]+@(\d+\.\d+\.\d+\.\d+)/i', $data['uri'] ?? '', $uri)
+                if (!preg_match('/^sip:[^@\s]+@(\d+\.\d+\.\d+\.\d+)(?::(\d+))?/i', $data['uri'] ?? '', $uri)
                     || $uri[1] !== $contacts[$extension]['ip']) continue;
+                if (isset($uri[2]) && (int)$uri[2]>=1 && (int)$uri[2]<=65535) $contacts[$extension]['port']=(int)$uri[2];
+                if (preg_match('/;transport=(udp|tcp|tls)\b/i',$data['uri']??'',$transportMatch)) $contacts[$extension]['transport']=strtolower($transportMatch[1]);
                 $userAgent = (string)($data['user_agent'] ?? '');
                 $contacts[$extension]['user_agent'] = $userAgent;
                 if (preg_match('/(?<![a-f0-9])([a-f0-9]{12}|(?:[a-f0-9]{2}[:-]){5}[a-f0-9]{2})(?![a-f0-9])/i', $userAgent, $identity)) {
@@ -361,7 +411,7 @@ class Provisioner implements \BMO {
         return $contacts;
     }
 
-    private function getCurrentArpMap() {
+    protected function getCurrentArpMap() {
         $result = [];
         $arp = @file('/proc/net/arp');
         if (!$arp) return $result;
@@ -402,6 +452,7 @@ class Provisioner implements \BMO {
         $discoveryCandidate = $discovered ? [
             'source' => 'discovery', 'label' => 'MAC identity discovery (' . $discovered['last_seen'] . ')',
             'ip' => $discovered['ip_address'], 'mac' => $mac, 'port' => (int)$discovered['sip_port'],
+            'transport' => $discovered['sip_transport'] ?? 'udp',
             'identity_source' => $discovered['source'], 'model' => $discovered['model'] ?? '', 'firmware' => $discovered['firmware'] ?? '',
             'stale' => strtotime($discovered['last_seen']) < time() - \FreePBX\modules\Provisioner\SipDiscovery::IDENTITY_MAX_AGE
         ] : null;
@@ -421,6 +472,8 @@ class Provisioner implements \BMO {
                     'ip' => $contacts[$extension]['ip'],
                     'mac' => $contacts[$extension]['mac'] ?? null,
                     'status' => $contacts[$extension]['status'] ?? 'Unknown',
+                    'port' => (int)($contacts[$extension]['port'] ?? 5060),
+                    'transport' => $contacts[$extension]['transport'] ?? 'udp',
                     'stale' => false
                 ];
                 break;
@@ -527,9 +580,11 @@ class Provisioner implements \BMO {
 
         return [
             'selected_ip' => $selectedIp,
+            'next_action' => trim((string)($device['extension'] ?? '')) === '' ? 'mapping'
+                : ($selectedIp !== null ? 'push' : (($conflict || strpos((string)$blockedReason, 'different handset MAC') !== false) ? 'diagnostics' : 'discovery')),
             'selected_source' => $selectedSource,
-            'selected_port' => $discovered && $discovered['ip_address'] === $selectedIp ? (int)$discovered['sip_port'] : 5060,
-            'selected_transport' => $discovered && $discovered['ip_address'] === $selectedIp ? ($discovered['sip_transport'] ?? 'udp') : 'udp',
+            'selected_port' => $discovered && $discovered['ip_address'] === $selectedIp ? (int)$discovered['sip_port'] : ($pjsipCandidate && $pjsipCandidate['ip']===$selectedIp ? $pjsipCandidate['port'] : 5060),
+            'selected_transport' => $discovered && $discovered['ip_address'] === $selectedIp ? ($discovered['sip_transport'] ?? 'udp') : ($pjsipCandidate && $pjsipCandidate['ip']===$selectedIp ? $pjsipCandidate['transport'] : 'udp'),
             'mac_confirmation_required' => $selectedIp === null && $macConfirmationRequired,
             'blocked_reason' => $selectedIp === null ? $blockedReason : null,
             'is_stale_fallback' => in_array($selectedSource, ['stored', 'previous_static_ip'], true) || ($selectedSource === 'discovery' && $discoveryCandidate['stale']),
@@ -576,6 +631,12 @@ class Provisioner implements \BMO {
             : 'Cross-subnet push needs a matching handset MAC/IP identity. Run Scan Network and, if needed, Identify MAC (identity is valid for 15 minutes).';
     }
 
+    private function pushIdentityFailureAction($error) {
+        if (strpos($error, 'Assign this handset MAC') === 0) return 'mapping';
+        if (strpos($error, 'different handset MAC') !== false) return 'diagnostics';
+        return 'discovery';
+    }
+
     private function getDevicePjsipStatus($extensions, $contacts) {
         foreach ($extensions as $extension) {
             if (isset($contacts[$extension])) return $contacts[$extension]['status'] ?? 'Unknown';
@@ -583,7 +644,7 @@ class Provisioner implements \BMO {
         return 'Not registered';
     }
 
-    private function getArpCapableSubnets() {
+    protected function getArpCapableSubnets() {
         $links = shell_exec('ip -o link show 2>/dev/null');
         $addresses = shell_exec('ip -o -f inet addr show up 2>/dev/null');
         if (!$links || !$addresses) return [];
@@ -725,7 +786,7 @@ class Provisioner implements \BMO {
         return $targets;
     }
 
-    private function resolveDeviceTargets($performScan = false, $onlyMac = null) {
+    protected function resolveDeviceTargets($performScan = false, $onlyMac = null) {
         if ($onlyMac) {
             $stmt = $this->db->prepare("SELECT * FROM provisioner_devices WHERE mac_address=?");
             $stmt->execute([strtolower($onlyMac)]);
@@ -734,7 +795,7 @@ class Provisioner implements \BMO {
             $devices = $this->db->query("SELECT * FROM provisioner_devices")->fetchAll(\PDO::FETCH_ASSOC);
         }
         $contacts = $this->getPjsipContacts(null, true);
-        $arpMap = $this->getCurrentArpMap();
+        $arpMap = $this->preflightArpMap + $this->getCurrentArpMap();
         $dhcpMap = $this->getDhcpLeaseMap();
         $localSubnets = $this->getArpCapableSubnets();
         $discoveryMap = $this->getDiscoveryObservations();
@@ -760,7 +821,7 @@ class Provisioner implements \BMO {
             }
             if (!$hasCandidate || $scanAllLocal) $scanSubnets = $configuredScanSubnets;
             $scanSubnets = array_values(array_unique($scanSubnets));
-            $arpMap = $scanSubnets ? $this->resolveDeviceIpsLocal($scanSubnets) : [];
+            $arpMap = $this->preflightArpMap + ($scanSubnets ? $this->resolveDeviceIpsLocal($scanSubnets) : []);
             foreach ($devices as $device) {
                 $mac = strtolower($device['mac_address']);
                 $targets[$mac] = $this->annotateResolutionMode($this->resolveDeviceTarget($device, $contacts, $arpMap, $dhcpMap, true, $localSubnets, $discoveryMap), $localSubnets);
@@ -809,7 +870,7 @@ class Provisioner implements \BMO {
             $jobStmt->execute([$device['last_push_job_id']]);
             $job = $jobStmt->fetch(\PDO::FETCH_ASSOC) ?: null;
         }
-        return [
+        $diagnostics = [
             'success' => true,
             'device' => [
                 'mac' => $mac,
@@ -848,8 +909,22 @@ class Provisioner implements \BMO {
                 'verify_at' => $device['last_verify_at'] ?? null,
                 'verify_ip' => $device['last_verify_ip'] ?? null
             ],
-            'verification_job' => $job
+            'verification_job' => $job,
+            'manual_verification' => $this->manualPushVerificationEligibility($mac)
         ];
+        require_once __DIR__ . '/lib/DiagnosticSummary.php';
+        $diagnostics['module_version'] = (string)simplexml_load_file(__DIR__ . '/module.xml')->version;
+        $diagnostics['php_version'] = PHP_VERSION;
+        $diagnostics['framework_version'] = null;
+        try {
+            $version = $this->db->query("SELECT version FROM modules WHERE modulename='framework'");
+            if ($version) $diagnostics['framework_version'] = $version->fetchColumn() ?: null;
+        } catch (\Throwable $error) {}
+        $asteriskVersion = (string)shell_exec($this->asteriskCliCommand('core show version') . ' 2>/dev/null');
+        $diagnostics['asterisk_version'] = preg_match('/\bAsterisk\s+([0-9][0-9A-Za-z._-]*)/', $asteriskVersion, $versionMatch) ? $versionMatch[1] : null;
+        $diagnostics['collected_at'] = date('c');
+        $diagnostics['diagnostic_summary'] = \FreePBX\modules\Provisioner\DiagnosticSummary::build($diagnostics);
+        return $diagnostics;
     }
 
     public function getPhoneStatus() {
@@ -861,6 +936,11 @@ class Provisioner implements \BMO {
         $dhcpMap = $this->getDhcpLeaseMap();
         $localSubnets = $this->getArpCapableSubnets();
         $discoveryMap = $this->getDiscoveryObservations();
+        $rolloutOwners = [];
+        if ($this->shouldQueuePush()) {
+            $stmt = $this->db->query("SELECT o.mac,o.rollout_id,r.status FROM provisioner_rollout_owners o JOIN provisioner_rollouts r ON r.id=o.rollout_id WHERE r.status IN ('queued','running')");
+            if ($stmt) $rolloutOwners = array_column($stmt->fetchAll(\PDO::FETCH_ASSOC),null,'mac');
+        }
         $results = [];
 
         foreach ($devices as $device) {
@@ -907,7 +987,9 @@ class Provisioner implements \BMO {
                 'last_verify_ip' => $device['last_verify_ip'] ?? null,
                 'ip_source'     => $target['selected_source'],
                 'stale_ip'      => $target['is_stale_fallback'],
-                'mac_confirmation_required' => $target['mac_confirmation_required'] ?? false
+                'mac_confirmation_required' => $target['mac_confirmation_required'] ?? false,
+                'push_next_action' => $target['next_action'],
+                'rollout' => $rolloutOwners[$mac] ?? null
             ];
         }
 
@@ -946,9 +1028,12 @@ class Provisioner implements \BMO {
                 $actions = '<span class="text-muted"><i class="fa fa-power-off"></i></span>';
                 $statusLabel = 'Offline';
             }
-            if (!empty($r['mac_confirmation_required'])) $statusLabel = '<span class="text-warning" title="Cross-subnet push needs a matching handset MAC/IP identity. Run Scan Network and Identify MAC, then review Diagnostics.">Identify MAC</span>';
+            if (!empty($r['mac_confirmation_required'])) $statusLabel = '<span class="text-warning" title="Push Config will try to find and identify this routed handset before delivery. A matching MAC is still required.">Identity check needed</span>';
             $actions .= ' <a class="clickable diagnostics-btn" data-mac="' . $r['mac'] . '" title="Device diagnostics"><i class="fa fa-stethoscope"></i></a>';
-            if ($sipNotifyMode) $actions .= ' <a class="clickable push-phone-btn" data-mac="' . $r['mac'] . '" title="Push config to this phone; target identity is checked again before sending"><i class="fa fa-paper-plane"></i> Push</a>';
+            $needsDiscovery = ($r['push_next_action'] ?? '') === 'discovery';
+            if ($sipNotifyMode) {
+                $actions .= ' <a class="clickable push-phone-btn" data-mac="' . $r['mac'] . '" title="Find and verify identity if needed, then push config to this phone"><i class="fa fa-paper-plane"></i> Push</a>';
+            }
             if ($manualIp) {
                 $statusLabel = '<span class="text-warning" title="' . htmlspecialchars($this->manualIpMessage($r['ip'], $r['static_ip']), ENT_QUOTES) . '"><i class="fa fa-exclamation-triangle"></i> IP Set Manually</span>';
             }
@@ -966,7 +1051,9 @@ class Provisioner implements \BMO {
                     ? '<span class="text-info">Waiting for download</span>'
                      : '<span class="text-warning" title="SIP accepted the trigger, but config delivery was not confirmed. Use Retry Push to try again.">Download not observed</span>';
             } elseif ($pushStatus === 'failed') {
-                $pushLabel = '<span class="text-danger" title="Push failed. Use Retry Push to try again.">Failed</span>';
+                $pushLabel = $needsDiscovery
+                    ? '<span class="text-warning" title="No usable handset target. Push Config can try automatic identification; configure an approved search range if no IP is known.">Phone lookup needed</span>'
+                    : '<span class="text-danger" title="Push failed. Use Retry Push to try again.">Failed</span>';
             } else {
                 $pushLabel = '<span class="text-muted">—</span>';
             }
@@ -976,6 +1063,11 @@ class Provisioner implements \BMO {
             $rebootEligible = ($r['needs_changes'] && $configExists)
                 || $isAvail
                 || (!$isRegistered && !empty($r['ip']));
+            if (!empty($r['rollout'])) {
+                $pushInProgress = true; $pushIssue = false; $rebootEligible = false;
+                $pushLabel = '<span class="text-info">' . ($r['rollout']['status'] === 'queued' ? 'Queued' : 'Rollout active') . '</span>';
+                $actions = '<span class="text-info">Push in progress</span> <a class="clickable diagnostics-btn" data-mac="' . $r['mac'] . '" title="Device diagnostics"><i class="fa fa-stethoscope"></i></a>';
+            }
             $registration = ($r['registration_status'] ?? '') === 'Avail' ? 'Registered'
                 : (($r['registration_status'] ?? '') === 'Unavail' ? 'Unavailable' : 'Not registered');
 
@@ -991,7 +1083,8 @@ class Provisioner implements \BMO {
                 'registration' => $registration,
                 'registered' => $registration === 'Registered',
                 'push_issue' => $pushIssue,
-                'push_retryable' => $pushIssue && !$pushInProgress,
+                'push_retryable' => $pushIssue && !$pushInProgress && !$needsDiscovery,
+                'push_next_action' => $r['push_next_action'] ?? 'push',
                 'push_in_progress' => $pushInProgress,
                 'reboot_eligible' => (bool)$rebootEligible,
                 'last_push_time' => $r['last_push_attempt_at'] ?? null,
@@ -1043,6 +1136,27 @@ class Provisioner implements \BMO {
     }
 
     public function rebootPhone($extension) {
+        if (!$this->shouldQueuePush()) return $this->rebootPhoneInternal($extension);
+        // Serialize the ownership check and reboot with queue submission and
+        // dispatch checkpoints. An endpoint fallback cannot bypass MAC ownership.
+        $this->db->beginTransaction();
+        try {
+            $suffix = $this->db->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'sqlite' ? '' : ' FOR UPDATE';
+            $control = $this->db->query('SELECT id FROM provisioner_rollout_control WHERE id=1'.$suffix);
+            if (!$control || !$control->fetchColumn()) throw new \RuntimeException('Install/upgrade Provisioner before rebooting.');
+            $owner = $this->db->prepare('SELECT o.rollout_id FROM provisioner_rollout_owners o JOIN provisioner_devices d ON d.mac_address=o.mac WHERE d.extension=? OR d.previous_extension=?');
+            if (!$owner || !$owner->execute([$extension,$extension])) throw new \RuntimeException('Could not check active push ownership.');
+            if ($owner->fetchColumn()) throw new \RuntimeException('This handset belongs to an active push. Wait for its saved report before rebooting.');
+            $result = $this->rebootPhoneInternal($extension);
+            $this->db->commit();
+            return $result;
+        } catch (\Throwable $error) {
+            if ($this->db->inTransaction()) $this->db->rollBack();
+            return ['success'=>false,'error'=>$error->getMessage()];
+        }
+    }
+
+    private function rebootPhoneInternal($extension) {
         $ext = preg_replace('/[^a-zA-Z0-9_-]/', '', $extension);
         $stmt = $this->db->prepare("SELECT * FROM provisioner_devices WHERE extension=? OR previous_extension=?");
         $stmt->execute([$ext, $ext]);
@@ -1071,20 +1185,18 @@ class Provisioner implements \BMO {
             } else {
                 // Fallback: ask Asterisk to send the NOTIFY (requires the notify
                 // type to be defined in pjsip_notify.conf).
-                $cmd = 'asterisk -rx ' . escapeshellarg("pjsip send notify sync-reboot-sangoma uri sip:$ip");
+                $cmd = $this->asteriskCliCommand("pjsip send notify sync-reboot-sangoma uri sip:$ip");
                 $targetEvent = 'sync-reboot-sangoma';
             }
             $output = shell_exec($cmd . ' 2>/dev/null');
             $success = strpos($output, 'OK') !== false;
         } else {
-            $output = shell_exec('asterisk -rx ' . escapeshellarg("pjsip send notify sync-reboot-sangoma endpoint $ext") . ' 2>/dev/null');
+            $output = shell_exec($this->asteriskCliCommand("pjsip send notify sync-reboot-sangoma endpoint $ext") . ' 2>/dev/null');
             $targetEvent = 'sync-reboot-sangoma';
             $success = strpos($output, 'Sending NOTIFY') !== false;
         }
-        if ($success) {
-            $this->db->prepare("UPDATE provisioner_devices SET needs_changes = 0, previous_extension = NULL, previous_description = NULL, previous_static_ip = NULL, previous_static_mask = NULL, previous_static_gw = NULL WHERE previous_extension = ? OR extension = ?")
-                ->execute([$extension, $extension]);
-        }
+        // A reboot acknowledgement is not registration/MAC/IP verification.
+        // Pending mapping changes must only be cleared by verified finalization.
         $this->addLog('reboot', "Reboot sent to extension $extension ($targetEvent)" . ($ip ? " (IP:$ip source:$source)" : " (endpoint fallback)"), $success ? 'success' : 'error');
         return ['success' => $success, 'output' => $output, 'ip' => $ip, 'ip_source' => $source];
     }
@@ -1713,6 +1825,7 @@ class Provisioner implements \BMO {
     }
 
     public function applyChanges($generate = true, $reboot = false, $finalize = true, $macs = []) {
+        if ($reboot && $this->shouldQueuePush() && !$this->rolloutQueueContext) return $this->applyChangesWithNotify($macs);
         $macs = $this->expandPushSelection($macs);
         $sql = "SELECT * FROM provisioner_devices WHERE needs_changes = 1";
         if ($macs) $sql = "SELECT * FROM provisioner_devices WHERE mac_address IN (" . implode(',', array_fill(0, count($macs), '?')) . ')';
@@ -1771,7 +1884,7 @@ class Provisioner implements \BMO {
             }
         }
 
-        if (($generate || $reboot) && $finalize) {
+        if (($generate || $reboot) && $finalize && !$this->shouldQueuePush()) {
             $ids = array_column($pending, 'id');
             $placeholders = implode(',', array_fill(0, count($ids), '?'));
             $this->db->prepare("UPDATE provisioner_devices SET needs_changes = 0, previous_extension = NULL, previous_description = NULL, previous_static_ip = NULL, previous_static_mask = NULL, previous_static_gw = NULL WHERE id IN ($placeholders)")->execute($ids);
@@ -3427,7 +3540,7 @@ class Provisioner implements \BMO {
      * accepted for installations with a custom log location, but it is not
      * required for normal operation.
      */
-    private function getProvisioningAccessLogPaths() {
+    protected function getProvisioningAccessLogPaths() {
         $paths = [];
         $configured = trim((string)$this->getSetting('apache_access_log'));
         if ($configured !== '') $paths[] = $configured;
@@ -3459,6 +3572,7 @@ class Provisioner implements \BMO {
             'filename' => basename($path),
             'path' => $path,
             'logs' => [],
+            'log_inodes' => [],
             'armed' => false,
             'observed' => null,
             'original_mtime' => is_file($path) ? @filemtime($path) : null,
@@ -3471,6 +3585,8 @@ class Provisioner implements \BMO {
             if (!is_readable($logPath)) continue;
             $size = @filesize($logPath);
             $observation['logs'][$logPath] = $size === false ? 0 : (int)$size;
+            $stat = @stat($logPath);
+            if ($stat) $observation['log_inodes'][$logPath] = $stat['dev'] . ':' . $stat['ino'];
         }
 
         if (is_file($path) && is_writable($path)
@@ -3517,10 +3633,10 @@ class Provisioner implements \BMO {
         ];
     }
 
-    private function checkFetchObservation(&$observation) {
+    private function checkFetchObservation(&$observation, $skipLogs = false) {
         if (!empty($observation['observed'])) return $observation['observed'];
 
-        foreach ($observation['logs'] as $logPath => $offset) {
+        foreach ($skipLogs ? [] : $observation['logs'] as $logPath => $offset) {
             clearstatcache(true, $logPath);
             if (!is_readable($logPath)) continue;
             $size = @filesize($logPath);
@@ -3651,8 +3767,8 @@ class Provisioner implements \BMO {
 
     private function getPushVerificationTimeout() {
         $configured = (int)$this->getSetting('push_verify_timeout');
-        if ($configured < 2) $configured = 75;
-        return min(120, $configured);
+        if ($configured < 2) $configured = $this->rolloutQueueContext ? 180 : 75;
+        return min($this->rolloutQueueContext ? 600 : 120, $configured);
     }
 
     public function getPushProgress($macs = []) {
@@ -3671,11 +3787,13 @@ class Provisioner implements \BMO {
         ];
     }
 
-    private function verifyPhoneAfterFetch($mac, $sourceIp, $fetch, $contacts = null, $arp = null, $requireRegistration = false) {
+    private function verifyPhoneAfterFetch($mac, $sourceIp, $fetch, $contacts = null, $arp = null, $requireRegistration = false, $device = null) {
         $mac = strtolower(preg_replace('/[^a-f0-9]/i', '', $mac));
-        $stmt = $this->db->prepare("SELECT * FROM provisioner_devices WHERE mac_address=?");
-        $stmt->execute([$mac]);
-        $device = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if ($device === null) {
+            $stmt = $this->db->prepare("SELECT * FROM provisioner_devices WHERE mac_address=?");
+            $stmt->execute([$mac]);
+            $device = $stmt->fetch(\PDO::FETCH_ASSOC);
+        }
         if (!$device) return ['verified' => false, 'ip' => null, 'method' => 'mapping_missing'];
 
         $contacts = $contacts === null ? $this->getPjsipContacts(null, true) : $contacts;
@@ -3742,18 +3860,22 @@ class Provisioner implements \BMO {
 
     private function getPushDownloadTimeout() {
         $configured = (int)$this->getSetting('push_download_timeout');
-        return $configured > 0 ? min(30, $configured) : 10;
+        return $configured > 0 ? min($this->rolloutQueueContext ? 120 : 30, $configured) : ($this->rolloutQueueContext ? 30 : 10);
     }
 
     private function waitForPushDownloads($phones, &$observations, $deadline = null, $jobId = null) {
         if ($deadline === null) $deadline = microtime(true) + $this->getPushDownloadTimeout();
         $pending = $phones;
         $results = [];
+        $observer = $this->waveFetchObserver ?: new \FreePBX\modules\Provisioner\FetchLogObserver($observations, function ($line,$filename) { return $this->parseProvisioningFetchLog($line,$filename); });
         try {
             do {
+                if ($this->rolloutQueueContext) $this->rolloutQueueContext->heartbeat();
+                $fetches = $observer->poll();
                 foreach ($pending as $mac => $sourceIp) {
-                    $fetch = $this->checkFetchObservation($observations[$mac]);
+                    $fetch = $fetches[$mac] ?? $this->checkFetchObservation($observations[$mac], true);
                     if ($fetch === null) continue;
+                    $observations[$mac]['observed'] = $fetch;
                     if (!empty($fetch['success'])) {
                         $this->setPushDownloaded($mac, $fetch['ip'] ?: $sourceIp, $jobId);
                         $results[$mac] = ['status' => 'downloaded', 'triggered' => true, 'downloaded' => true, 'verified' => false];
@@ -3788,7 +3910,8 @@ class Provisioner implements \BMO {
             $stmt->execute([$mac]);
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
             if (!$row) continue;
-            $this->db->prepare('UPDATE provisioner_devices SET last_push_job_id=? WHERE id=?')->execute([$jobId, $row['id']]);
+            $claim = $this->db->prepare('UPDATE provisioner_devices SET last_push_job_id=? WHERE id=?');
+            if (!$claim || !$claim->execute([$jobId, $row['id']])) throw new \RuntimeException('Could not save push job ownership.');
             $snapshots[$mac] = $row;
         }
         return $snapshots;
@@ -3808,14 +3931,73 @@ class Provisioner implements \BMO {
         return implode(' AND ', $conditions);
     }
 
+    private function encodePushJobPayload($payload) {
+        $json = json_encode($payload);
+        if ($json === false) throw new \RuntimeException('Could not encode push job: ' . json_last_error_msg());
+        if (strlen($json) > 16777215) throw new \RuntimeException('Push job exceeds the 16 MB storage limit. Select fewer phones.');
+        return $json;
+    }
+
+    private function configRevision($mac) {
+        $path = $this->getConfigFilePath($mac);
+        if (is_link($path)) throw new \RuntimeException('Refusing a linked handset config file.');
+        if (!is_file($path)) return null;
+        $hash = hash_file('sha256',$path);
+        if ($hash === false) throw new \RuntimeException('Could not read the handset config revision.');
+        return $hash;
+    }
+
+    private function reservePushVerificationJob($jobId, $phones, $snapshots, $groups) {
+        \FreePBX\modules\Provisioner\PushJobSchema::assertReady($this->db);
+        $revisions = [];
+        foreach ($phones as $mac => $ip) $revisions[$mac] = $this->configRevision($mac);
+        $json = $this->encodePushJobPayload(['phones'=>$phones, 'snapshots'=>$snapshots, 'groups'=>$groups, 'deadline'=>null, 'config_revisions'=>$revisions]);
+        $stmt = $this->db->prepare("INSERT INTO provisioner_push_jobs (id,status,payload,created_at) VALUES (?,'prepared',?,NOW())");
+        if (!$stmt || !$stmt->execute([$jobId, $json])) throw new \RuntimeException('Could not persist push job before notification. No phones were notified.');
+    }
+
+    private function prepareBulkPushJob($jobId, $phones, $groups) {
+        \FreePBX\modules\Provisioner\PushJobSchema::assertReady($this->db);
+        $owns = !$this->db->inTransaction();
+        if ($owns) $this->db->beginTransaction();
+        try {
+            $snapshots = $this->capturePushJobSnapshots(array_keys($phones), $jobId);
+            if (count($snapshots) !== count($phones)) throw new \RuntimeException('A handset mapping disappeared before push preparation. No phones were notified.');
+            $this->reservePushVerificationJob($jobId, $phones, $snapshots, $groups);
+            if ($owns) $this->db->commit();
+            return $snapshots;
+        } catch (\Throwable $error) {
+            if ($owns && $this->db->inTransaction()) $this->db->rollBack();
+            throw $error;
+        }
+    }
+
     private function createPushVerificationJob($jobId, $phones, $snapshots, $groups, $launch = true) {
-        if (!$phones) return false;
+        if (!$phones) {
+            $this->failPushVerificationJob($jobId, 'No config downloads observed. Review handset state before retrying.');
+            return false;
+        }
         $payload = ['phones' => $phones, 'snapshots' => $snapshots, 'groups' => $groups,
             'deadline' => microtime(true) + $this->getPushVerificationTimeout()];
-        $ok = $this->db->prepare("INSERT INTO provisioner_push_jobs (id,status,payload,created_at) VALUES (?,'queued',?,NOW())")
-            ->execute([$jobId, json_encode($payload)]);
-        if (!$ok) {
-            $this->failPushVerificationJob($jobId, 'Could not queue background verification');
+        try {
+            \FreePBX\modules\Provisioner\PushJobSchema::assertReady($this->db);
+            // Legacy callers may queue verification without a bulk reservation.
+            $stmt = $this->db->prepare('SELECT status,payload FROM provisioner_push_jobs WHERE id=?');
+            $stmt->execute([$jobId]);
+            $saved = $stmt->fetch(\PDO::FETCH_ASSOC);
+            if (!$saved) {
+                $this->reservePushVerificationJob($jobId, $phones, $snapshots, $groups);
+                $stmt->execute([$jobId]); $saved = $stmt->fetch(\PDO::FETCH_ASSOC);
+            } elseif ($saved['status'] !== 'prepared') {
+                return false; // Never requeue an already claimed/finished attempt.
+            }
+            $reserved = json_decode($saved['payload'],true,512,JSON_THROW_ON_ERROR);
+            $payload['config_revisions'] = $reserved['config_revisions'] ?? [];
+            $json = $this->encodePushJobPayload($payload);
+            $stmt = $this->db->prepare("UPDATE provisioner_push_jobs SET status='queued',payload=?,created_at=NOW() WHERE id=? AND status='prepared'");
+            if (!$stmt->execute([$json, $jobId]) || $stmt->rowCount() !== 1) throw new \RuntimeException('Could not queue background verification');
+        } catch (\Throwable $error) {
+            $this->failPushVerificationJob($jobId, 'Could not queue background verification: ' . $error->getMessage());
             return false;
         }
         $this->db->prepare('DELETE FROM provisioner_push_jobs WHERE finished_at IS NOT NULL AND finished_at<?')
@@ -3844,28 +4026,31 @@ class Provisioner implements \BMO {
     }
 
     public function failPushVerificationJob($jobId, $error) {
-        $this->db->prepare("UPDATE provisioner_push_jobs SET status='failed', finished_at=NOW(), error=? WHERE id=? AND status IN ('queued','running')")->execute([$error, $jobId]);
+        $this->db->prepare("UPDATE provisioner_push_jobs SET status='failed', finished_at=NOW(), error=? WHERE id=? AND status IN ('prepared','queued','running')")->execute([$error, $jobId]);
         $this->db->prepare("UPDATE provisioner_devices SET last_verify_status='failed' WHERE last_push_job_id=? AND last_push_status='downloaded' AND last_verify_status IN ('pending','verifying')")->execute([$jobId]);
         $this->addLog('verify', "Background verification $jobId: $error", 'warning');
         $stmt = $this->db->prepare('SELECT batch_id,mac,data FROM provisioner_batch_items WHERE job_id=?'); $stmt->execute([$jobId]);
+        $batches = [];
         foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $item) {
             $data = json_decode($item['data'],true);
             if (in_array($data['outcome'], ['running','verifying'], true)) {
                 $this->patchBatchItem($item['batch_id'],$item['mac'], ['verification'=>'failed','outcome'=>'incomplete','error'=>$error]);
-                $this->getBatchReport($item['batch_id']);
+                $batches[$item['batch_id']] = true;
             }
         }
+        foreach (array_keys($batches) as $id) $this->getBatchReport($id);
     }
 
     private function expirePushVerificationJobs() {
-        $stmt = $this->db->prepare("SELECT id FROM provisioner_push_jobs WHERE status IN ('queued','running') AND created_at<?");
-        $stmt->execute([date('Y-m-d H:i:s', time() - 150)]);
+        $managed = $this->shouldQueuePush() ? " AND NOT EXISTS (SELECT 1 FROM provisioner_batch_items i JOIN provisioner_rollouts r ON r.id=i.batch_id WHERE i.job_id=provisioner_push_jobs.id AND r.status IN ('queued','running'))" : '';
+        $stmt = $this->db->prepare("SELECT id FROM provisioner_push_jobs WHERE ((status IN ('queued','running') AND created_at<?) OR (status='prepared' AND created_at<?))$managed");
+        $stmt->execute([date('Y-m-d H:i:s', time() - 150), date('Y-m-d H:i:s', time() - 600)]);
         foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $jobId) {
             $this->failPushVerificationJob($jobId, 'Background worker did not finish; use Diagnostics → Verify Last Push');
         }
     }
 
-    private function finalizePushJob($jobId, $payload, $results) {
+    private function finalizePushJob($jobId, $payload, &$results) {
         $units = [];
         $grouped = [];
         foreach ($payload['groups'] as $group) {
@@ -3876,15 +4061,28 @@ class Provisioner implements \BMO {
         foreach ($payload['phones'] as $mac => $ip) if (!isset($grouped[$mac])) $units[] = [$mac];
         foreach ($units as $unit) {
             foreach ($unit as $mac) if (empty($results[$mac]['verified']) || empty($payload['snapshots'][$mac])) continue 2;
-            $this->db->beginTransaction();
+            $configLock = $this->acquireConfigWriteLock();
+            if (!$configLock) throw new \RuntimeException('Could not lock config revisions for verified finalization.');
             try {
+                if ($this->rolloutQueueContext) $this->rolloutQueueContext->heartbeat(true);
+                $this->db->beginTransaction();
                 $valid = true;
+                $invalidReason = '';
                 foreach ($unit as $mac) {
+                    if (isset($payload['config_revisions'][$mac]) && $this->configRevision($mac) !== $payload['config_revisions'][$mac]) {
+                        $invalidReason = 'Config revision changed before finalization for ' . $mac . '.';
+                        $valid = false;
+                        break;
+                    }
                     $guard = $this->pushJobGuard($jobId, $payload['snapshots'][$mac], $params);
                     $lock = $this->db->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'sqlite' ? '' : ' FOR UPDATE';
                     $stmt = $this->db->prepare("SELECT id FROM provisioner_devices WHERE $guard AND last_verify_status='verified'$lock");
-                    $stmt->execute($params);
-                    if (!$stmt->fetchColumn()) { $valid = false; break; }
+                    if (!$stmt->execute($params)) throw new \RuntimeException('Could not check mapping before verified finalization.');
+                    if (!$stmt->fetchColumn()) {
+                        $valid = false;
+                        $invalidReason = 'Mapping, push ownership, or verification changed before finalization for ' . $mac . '.';
+                        break;
+                    }
                 }
                 if ($valid) {
                     foreach ($unit as $mac) {
@@ -3892,17 +4090,32 @@ class Provisioner implements \BMO {
                         $ok = $this->db->prepare("UPDATE provisioner_devices SET needs_changes=0, previous_extension=NULL, previous_description=NULL, previous_static_ip=NULL, previous_static_mask=NULL, previous_static_gw=NULL WHERE $guard")->execute($params);
                         if (!$ok) throw new \RuntimeException('Could not finalize verified push');
                     }
+                } else {
+                    // Finalization is all-or-nothing for a swap group. A
+                    // successful registration check alone must not advance the
+                    // rollout after the mapping/config guard has rejected it.
+                    foreach ($unit as $mac) {
+                        $results[$mac] = ['verified'=>false,'method'=>'superseded','reason'=>$invalidReason . ' This phone or its swap group was not finalized; review before submitting a new push.'];
+                        $stmt = $this->db->prepare("UPDATE provisioner_devices SET last_push_status='downloaded',last_verify_status='failed',last_verify_at=NOW() WHERE mac_address=? AND last_push_job_id=? AND last_push_status='verified' AND last_verify_status='verified'");
+                        if (!$stmt->execute([$mac,$jobId])) throw new \RuntimeException('Could not record superseded verification.');
+                    }
                 }
                 $this->db->commit();
             } catch (\Throwable $e) {
                 if ($this->db->inTransaction()) $this->db->rollBack();
                 throw $e;
+            } finally {
+                $this->releasePhoneFetchLock($configLock);
             }
         }
     }
 
     public function processPushVerificationJob($jobId, $contacts = null, $arp = null, $deadline = null) {
         if (!preg_match('/^[a-f0-9]{32}$/', $jobId)) return false;
+        if ($this->shouldQueuePush() && !$this->rolloutQueueContext) {
+            $managed = $this->db->prepare('SELECT r.id FROM provisioner_rollouts r JOIN provisioner_batch_items i ON i.batch_id=r.id WHERE i.job_id=? LIMIT 1');
+            if (!$managed || !$managed->execute([$jobId]) || $managed->fetchColumn()) return false;
+        }
         $claim = $this->db->prepare("UPDATE provisioner_push_jobs SET status='running' WHERE id=? AND status='queued'");
         $claim->execute([$jobId]);
         if ($claim->rowCount() !== 1) return false;
@@ -3914,15 +4127,21 @@ class Provisioner implements \BMO {
             if ($deadline === null) $deadline = (float)$payload['deadline'];
             $pending = $payload['phones'];
             $results = [];
+            $marked = [];
             do {
+                if ($this->rolloutQueueContext) $this->rolloutQueueContext->heartbeat();
                 $currentContacts = $contacts === null ? $this->getPjsipContacts(null, true) : $contacts;
                 $currentArp = $arp === null ? $this->getCurrentArpMap() : $arp;
+                $stmt = $this->db->prepare('SELECT * FROM provisioner_devices WHERE mac_address IN (' . implode(',', array_fill(0,count($pending),'?')) . ')');
+                $stmt->execute(array_keys($pending));
+                $devices = array_column($stmt->fetchAll(\PDO::FETCH_ASSOC),null,'mac_address');
                 foreach ($pending as $mac => $sourceIp) {
                     $guard = $this->pushJobGuard($jobId, $payload['snapshots'][$mac], $params);
-                    $stmt = $this->db->prepare("SELECT last_verify_status, last_verify_ip FROM provisioner_devices WHERE $guard");
-                    $stmt->execute($params);
-                    $row = $stmt->fetch(\PDO::FETCH_ASSOC);
-                    if (!$row) {
+                    $row = $devices[$mac] ?? null;
+                    $matches = $row && ($row['last_push_job_id'] ?? '') === $jobId;
+                    foreach ($payload['snapshots'][$mac] as $field => $value) if (($row[$field] ?? null) != $value) $matches = false;
+                    if (isset($payload['config_revisions'][$mac]) && $this->configRevision($mac) !== $payload['config_revisions'][$mac]) $matches = false;
+                    if (!$matches) {
                         $results[$mac] = ['verified' => false, 'method' => 'superseded'];
                         unset($pending[$mac]);
                         continue;
@@ -3932,8 +4151,11 @@ class Provisioner implements \BMO {
                         unset($pending[$mac]);
                         continue;
                     }
-                    $this->db->prepare("UPDATE provisioner_devices SET last_verify_status='verifying' WHERE $guard")->execute($params);
-                    $verification = $this->verifyPhoneAfterFetch($mac, $sourceIp, ['success' => true, 'ip' => $sourceIp], $currentContacts, $currentArp, true);
+                    if (!isset($marked[$mac])) {
+                        $this->db->prepare("UPDATE provisioner_devices SET last_verify_status='verifying' WHERE $guard")->execute($params);
+                        $marked[$mac] = true;
+                    }
+                    $verification = $this->verifyPhoneAfterFetch($mac, $sourceIp, ['success' => true, 'ip' => $sourceIp], $currentContacts, $currentArp, true, $row);
                     $results[$mac] = $verification;
                     if (!empty($verification['verified'])) {
                         $values = array_merge([$verification['ip'], $verification['ip']], $params);
@@ -3948,26 +4170,30 @@ class Provisioner implements \BMO {
                     }
                 }
                 if (!$pending || microtime(true) >= $deadline) break;
-                usleep(500000);
+                usleep(2000000);
             } while (true);
             foreach ($pending as $mac => $sourceIp) {
                 $guard = $this->pushJobGuard($jobId, $payload['snapshots'][$mac], $params);
                 $this->db->prepare("UPDATE provisioner_devices SET last_verify_status='failed', last_verify_at=NOW() WHERE $guard AND last_verify_status<>'verified'")->execute($params);
                 $this->addLog('verify', "Verification incomplete MAC:$mac — " . ($results[$mac]['reason'] ?? 'registration not observed'), 'warning');
             }
+            if ($this->rolloutQueueContext) $this->rolloutQueueContext->heartbeat(true);
             $this->finalizePushJob($jobId, $payload, $results);
+            $this->deferBatchReconciliation = true;
             foreach ($results as $mac => $verification) {
                 $outcome = !empty($verification['verified']) ? 'verified' : (($verification['method'] ?? '') === 'superseded' ? 'superseded' : 'incomplete');
                 $this->recordBatchStage($mac, ['verification'=>$outcome,'outcome'=>$outcome,'verify_ip'=>$verification['ip'] ?? null,
                     'verification_method'=>$verification['method'] ?? '', 'verification_at'=>date('Y-m-d H:i:s'),
                     'error'=>$outcome === 'verified' ? '' : ($verification['reason'] ?? ($outcome === 'superseded' ? 'Mapping or push superseded this attempt.' : 'Registration not verified.'))], $jobId);
             }
+            $this->flushBatchReconciliation();
             $this->notifyLiveStatus();
             $complete = !array_filter($results, function ($result) { return empty($result['verified']); });
             $superseded = array_filter($results, function ($result) { return ($result['method'] ?? '') === 'superseded'; });
             $this->db->prepare('UPDATE provisioner_push_jobs SET status=?, finished_at=NOW() WHERE id=?')->execute([$superseded ? 'superseded' : ($complete ? 'complete' : 'incomplete'), $jobId]);
             return $results;
         } catch (\Throwable $e) {
+            $this->flushBatchReconciliation();
             $this->failPushVerificationJob($jobId, $e->getMessage());
             return false;
         }
@@ -4053,7 +4279,56 @@ class Provisioner implements \BMO {
         return $results;
     }
 
+    private function manualPushVerificationEligibility($mac) {
+        if (!$this->shouldQueuePush()) return ['allowed'=>true];
+        $macs = [$mac];
+        foreach ($this->getPendingExtensionSwapGroups() as $group) {
+            if (in_array($mac,$group,true)) { $macs = $group; break; }
+        }
+        $placeholders = implode(',',array_fill(0,count($macs),'?'));
+        $stmt = $this->db->prepare("SELECT rollout_id FROM provisioner_rollout_owners WHERE mac IN ($placeholders) LIMIT 1");
+        if (!$stmt || !$stmt->execute($macs)) throw new \RuntimeException('Could not check active rollout ownership. Manual verification was not started.');
+        $owner = $stmt->fetchColumn();
+        if ($owner !== false) return ['allowed'=>false,'code'=>'rollout_active','batch_id'=>$owner,
+            'reason'=>'This phone or a swap partner belongs to an active rollout. Automatic verification is in progress; wait for its saved report before using Verify Last Push.'];
+        $stmt = $this->db->prepare("SELECT j.id FROM provisioner_devices d JOIN provisioner_push_jobs j ON j.id=d.last_push_job_id WHERE d.mac_address IN ($placeholders) AND j.status IN ('prepared','queued','running') LIMIT 1");
+        if (!$stmt || !$stmt->execute($macs)) throw new \RuntimeException('Could not check the verification worker. Manual verification was not started.');
+        if ($stmt->fetchColumn() !== false) return ['allowed'=>false,'code'=>'verification_active',
+            'reason'=>'Automatic verification is still in progress. Wait for the saved report before using Verify Last Push.'];
+        return ['allowed'=>true];
+    }
+
     public function verifyPushStatus($mac, $contacts = null, $arp = null) {
+        if (!$this->shouldQueuePush()) return $this->verifyPushStatusInternal($mac,$contacts,$arp);
+        if ($this->db->inTransaction()) return ['success'=>false,'verified'=>false,'code'=>'verification_busy',
+            'error'=>'Manual verification cannot start inside another operation. Wait for the saved report.'];
+        $mac = strtolower(preg_replace('/[^a-f0-9]/i','',$mac));
+        try {
+            if (!$this->db->beginTransaction()) throw new \RuntimeException('Could not lock manual verification.');
+            // Use the same control-row lock as submission/worker claims. A stale
+            // diagnostics page must not race a newly queued rollout, and a new
+            // submission must not begin midway through manual finalization.
+            $suffix = $this->db->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'sqlite' ? '' : ' FOR UPDATE';
+            $stmt = $this->db->prepare('SELECT schema_revision FROM provisioner_rollout_control WHERE id=1'.$suffix);
+            if (!$stmt || !$stmt->execute() || (int)$stmt->fetchColumn() !== \FreePBX\modules\Provisioner\RolloutSchema::REVISION) {
+                throw new \RuntimeException('Complete the official Module Admin upgrade before using manual verification.');
+            }
+            $eligibility = $this->manualPushVerificationEligibility($mac);
+            if (!$eligibility['allowed']) {
+                $this->db->rollBack();
+                return ['success'=>false,'verified'=>false,'code'=>$eligibility['code'],'error'=>$eligibility['reason'],
+                    'batch_id'=>$eligibility['batch_id'] ?? null];
+            }
+            $result = $this->verifyPushStatusInternal($mac,$contacts,$arp);
+            if (!$this->db->commit()) throw new \RuntimeException('Could not commit manual verification.');
+            return $result;
+        } catch (\Throwable $error) {
+            if ($this->db->inTransaction()) $this->db->rollBack();
+            return ['success'=>false,'verified'=>false,'code'=>'verification_unavailable','error'=>$error->getMessage()];
+        }
+    }
+
+    private function verifyPushStatusInternal($mac, $contacts = null, $arp = null) {
         $mac = strtolower(preg_replace('/[^a-f0-9]/i', '', $mac));
         $stmt = $this->db->prepare("SELECT * FROM provisioner_devices WHERE mac_address=?");
         $stmt->execute([$mac]);
@@ -4122,8 +4397,10 @@ class Provisioner implements \BMO {
     }
 
     public function sendSipNotify($phoneIp, $mac, $phonePort = 5060) {
+        if ($this->shouldQueuePush()) return $this->pushToPhones([$mac]);
         $identityError = $this->getPushIdentityError($phoneIp, $mac);
-        if ($identityError) return ['success' => false, 'triggered' => false, 'downloaded' => false, 'verified' => false, 'error' => $identityError];
+        if ($identityError) return ['success' => false, 'triggered' => false, 'downloaded' => false, 'verified' => false, 'error' => $identityError,
+            'next_action' => $this->pushIdentityFailureAction($identityError)];
         $pbxIp = $this->getSetting('pbx_ip') ?: $this->getLocalIP();
         $python = $this->findPython3Binary();
         if (!$python) return ['success' => false, 'error' => 'Python 3 not found (checked python3 and python3.6)'];
@@ -4343,6 +4620,15 @@ class Provisioner implements \BMO {
         } catch (\Throwable $error) { return ['success' => false, 'error' => $error->getMessage()]; }
     }
 
+    public function testDiscoveryCallback() {
+        $source = $this->getSetting('pbx_ip') ?: $this->getLocalIP();
+        if (!$this->isPrivateIp($source)) return ['success' => false, 'code' => 'callback_configuration',
+            'message' => 'Configure a private PBX IPv4 address for the callback test.',
+            'next_step' => 'Review the PBX address in Provisioner Settings.'];
+        require_once __DIR__ . '/lib/CallbackDiagnostics.php';
+        return \FreePBX\modules\Provisioner\CallbackDiagnostics::check($source, $this->getSetting('prov_port') ?: 2001);
+    }
+
     public function startIdentifyMac($scanId, $ids) {
         $store = new \FreePBX\modules\Provisioner\SipDiscovery();
         $scan = $store->load($scanId);
@@ -4361,6 +4647,12 @@ class Provisioner implements \BMO {
             $source = $scan['payload']['source_ip'];
             $port = (int)($this->getSetting('prov_port') ?: 2001);
             if ($port < 1 || $port > 65535) throw new \RuntimeException('Configure a valid provisioning HTTP port first.');
+            require_once __DIR__ . '/lib/CallbackDiagnostics.php';
+            $callback = \FreePBX\modules\Provisioner\CallbackDiagnostics::check($source, $port);
+            if (!$callback['success']) {
+                $this->addLog('discovery', 'Identify MAC not started: [' . $callback['code'] . '] ' . $callback['message'] . ' Next: ' . $callback['next_step'], 'warning');
+                return ['success' => false, 'error' => $callback['message'] . ' ' . $callback['next_step'], 'callback_test' => $callback];
+            }
             $job = $store->create('identify', ['source_ip' => $source, 'targets' => $targets, 'scan_id' => $scanId,
                 'receiver_url' => 'http://' . $source . ':' . $port . '/admin/modules/provisioner/discovery_receiver.php',
                 'original_devices' => $scan['result']['devices']]);
@@ -4380,7 +4672,11 @@ class Provisioner implements \BMO {
         if ($job['type'] === 'scan' && empty($job['result'])) {
             $result['devices'] = $this->formatSipDiscoveryResponses($progress['responses'] ?? [], $job['payload']['registrations'], $job['payload']['local_devices'] ?? [], $excluded);
         }
+        $attempted = $job['type'] === 'identify' ? count($job['payload']['targets'] ?? []) : 0;
+        $failures = count($result['errors'] ?? []);
         return ['success' => true, 'job_id' => $id, 'type' => $job['type'], 'status' => $job['status'],
+            'identified_count' => $job['type'] === 'identify' && $job['status'] === 'complete' ? max(0, $attempted - $failures) : 0,
+            'failed_count' => $failures, 'attempted_count' => $attempted,
             'complete' => $job['status'] === 'complete', 'done' => $progress['done'] ?? 0, 'total' => $progress['total'] ?? 0,
             'scan_mode' => $job['payload']['scan_mode'] ?? 'routed',
             'phase' => $progress['phase'] ?? ($job['type'] === 'identify' ? 'identify' : (!empty($job['payload']['local_subnets']) ? 'local_arp' : 'sip_options')),
@@ -4433,7 +4729,12 @@ class Provisioner implements \BMO {
                 $byIp = array_column($job['payload']['original_devices'], null, 'ip');
                 foreach ($progress['identities'] ?? [] as $received) {
                     $identity = $received['identity'] ?? null;
-                    if (!$identity) { $errors[] = ['ip' => $received['ip'], 'error' => $received['error']]; continue; }
+                    if (!$identity) {
+                        $errors[] = ['ip' => $received['ip'], 'error' => $received['error'],
+                            'code' => $received['code'] ?? 'identity_failed', 'sip_status' => $received['sip_status'] ?? null,
+                            'next_step' => $received['next_step'] ?? 'Run Test Callback Access and review handset connectivity.'];
+                        continue;
+                    }
                     $row = $byIp[$identity['ip']];
                     $row = array_replace($row, $identity);
                     $row['last_seen'] = date('Y-m-d H:i:s', (int)($identity['seen_at'] ?? time()));
@@ -4451,8 +4752,15 @@ class Provisioner implements \BMO {
             $this->saveDiscoveryObservations($devices);
             $job['status'] = 'complete'; $job['result'] = ['devices' => $devices, 'errors' => $errors, 'excluded_responders' => $excludedResponders];
             $store->save($job);
-            $this->addLog('discovery', ($job['type'] === 'scan' ? (empty($job['payload']['local_subnets']) ? 'Read-only routed SIP scan' : 'Read-only local ping/ARP + SIP scan') : 'Selected IP MAC identification')
-                . ': ' . count(array_filter($devices, function ($device) { return !empty($device['mac']); })) . ' Digium/ALE identities', 'success');
+            if ($job['type'] === 'identify') {
+                $this->addLog('discovery', 'Selected IP MAC identification: ' . (count($job['payload']['targets']) - count($errors))
+                    . ' identified; ' . count($errors) . ' failed', $errors ? 'warning' : 'success');
+                foreach ($errors as $error) $this->addLog('discovery', 'Identify MAC IP:' . $error['ip'] . ' [' . $error['code'] . '] '
+                    . $error['error'] . ' Next: ' . $error['next_step'], 'warning');
+            } else {
+                $this->addLog('discovery', (empty($job['payload']['local_subnets']) ? 'Read-only routed SIP scan' : 'Read-only local ping/ARP + SIP scan')
+                    . ': ' . count(array_filter($devices, function ($device) { return !empty($device['mac']); })) . ' Digium/ALE identities', 'success');
+            }
             return true;
         } catch (\Throwable $error) {
             $job['status'] = 'failed'; $job['error'] = $error->getMessage(); $store->save($job);
@@ -4561,6 +4869,7 @@ class Provisioner implements \BMO {
     }
 
     private function pushConfigToPhonesBulk($macsWithIps, $finalize = true) {
+        if ($this->shouldQueuePush() && !$this->rolloutQueueContext) throw new \RuntimeException('Provisioning notifications must run inside the durable rollout worker.');
         $pbxIp = $this->getSetting('pbx_ip') ?: $this->getLocalIP();
         $provPort = $this->getSetting('prov_port') ?: '2001';
         $python = $this->findPython3Binary();
@@ -4576,8 +4885,19 @@ class Provisioner implements \BMO {
         $localSubnets = $this->getArpCapableSubnets();
         foreach ($macsWithIps as $m) {
             $identityError = $this->getPushIdentityError($m['ip'], $m['mac'], $contacts, $observationsByMac, $localSubnets);
-            if ($identityError) $failed[] = $m + ['error' => $identityError];
+            if ($identityError) $failed[] = $m + ['error' => $identityError, 'next_action' => $this->pushIdentityFailureAction($identityError)];
             else $normal[] = $m;
+        }
+        $swapGroups = $this->getPendingExtensionSwapGroups();
+        foreach ($swapGroups as $group) {
+            $eligible = array_column($normal,'mac');
+            if (!array_intersect($group,$eligible) || !array_diff($group,$eligible)) continue;
+            $kept = [];
+            foreach ($normal as $phone) {
+                if (in_array($phone['mac'],$group,true)) $failed[] = $phone + ['error'=>'An extension swap partner failed the final identity check. No member of this swap was notified.','next_action'=>'diagnostics'];
+                else $kept[] = $phone;
+            }
+            $normal = $kept;
         }
 
         $sent = [];
@@ -4586,10 +4906,16 @@ class Provisioner implements \BMO {
         $sources = [];
         $methods = [];
         $observations = [];
+        if ($this->rolloutQueueContext) $this->waveFetchObservations =& $observations;
         $jobId = bin2hex(random_bytes(16));
-        $snapshots = $this->capturePushJobSnapshots(array_map(function ($phone) {
-            return strtolower(preg_replace('/[^a-f0-9]/i', '', $phone['mac']));
-        }, $normal), $jobId);
+        try {
+            $plannedPhones = [];
+            foreach ($normal as $phone) $plannedPhones[strtolower($phone['mac'])] = $phone['ip'];
+            $snapshots = $plannedPhones ? $this->prepareBulkPushJob($jobId, $plannedPhones, $swapGroups) : [];
+        } catch (\Throwable $error) {
+            foreach ($normal as $phone) $failed[] = $phone + ['error'=>$error->getMessage()];
+            return ['success'=>false, 'error'=>$error->getMessage(), 'sent'=>[], 'downloaded'=>[], 'verified'=>[], 'failed'=>$failed];
+        }
         foreach ($normal as $phone) {
             $mac = strtolower($phone['mac']);
             $this->recordBatchStage($mac, ['target_ip'=>$phone['ip'],'target_source'=>$phone['source'] ?? '', 'attempt_at'=>date('Y-m-d H:i:s'),
@@ -4600,12 +4926,12 @@ class Provisioner implements \BMO {
                 if (($data['generation'] ?? '') === 'not_started') $this->recordBatchStage($mac, ['generation'=>'existing_config']);
             }
         }
-        $swapGroups = $this->getPendingExtensionSwapGroups();
         foreach ($normal as $m) {
             $macClean = strtolower(preg_replace('/[^a-f0-9]/i', '', $m['mac']));
             $sources[$macClean] = $m['source'] ?? 'unknown';
             $observations[$macClean] = $this->beginFetchObservation($macClean);
         }
+        $this->waveFetchObserver = new \FreePBX\modules\Provisioner\FetchLogObserver($observations, function ($line,$filename) { return $this->parseProvisioningFetchLog($line,$filename); });
 
         if (!empty($normal)) {
             $phones = [];
@@ -4632,26 +4958,29 @@ class Provisioner implements \BMO {
             file_put_contents($tmpFile, json_encode($phones));
 
             $cmd = escapeshellcmd($python) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($tmpFile) . ' 2>/dev/null';
-            $output = shell_exec($cmd);
+            if ($this->rolloutQueueContext) $this->rolloutQueueContext->checkpoint(array_keys($plannedPhones));
+            $output = $this->dispatchRolloutPhones($phones, $cmd);
             @unlink($tmpFile);
 
             if (!$output) {
+                $this->failPushVerificationJob($jobId, 'Bulk notification returned no output; delivery is uncertain. Review handset state before retrying.');
                 foreach ($normal as $m) {
                     $macClean = strtolower(preg_replace('/[^a-f0-9]/i', '', $m['mac']));
                     $this->finishFetchObservation($observations[$macClean]);
                     $this->setPushTriggerFailed($macClean, $jobId);
-                    $failed[] = ['mac' => $macClean, 'ip' => $m['ip'], 'source' => $m['source'] ?? 'unknown', 'error' => 'bulk script returned no output'];
+                    $failed[] = ['mac' => $macClean, 'ip' => $m['ip'], 'source' => $m['source'] ?? 'unknown', 'error' => 'Bulk script returned no output; delivery is uncertain. Review handset state before retrying.', 'delivery_uncertain'=>true, 'next_action'=>'diagnostics'];
                 }
                 return ['success' => false, 'error' => 'Bulk script returned no output', 'sent' => $sent, 'downloaded' => $downloaded, 'verified' => $verified, 'failed' => $failed];
             }
 
             $parsed = json_decode($output, true);
             if (!$parsed || !isset($parsed['results'])) {
+                $this->failPushVerificationJob($jobId, 'Bulk notification returned invalid JSON; delivery is uncertain. Review handset state before retrying.');
                 foreach ($normal as $m) {
                     $macClean = strtolower(preg_replace('/[^a-f0-9]/i', '', $m['mac']));
                     $this->finishFetchObservation($observations[$macClean]);
                     $this->setPushTriggerFailed($macClean, $jobId);
-                    $failed[] = ['mac' => $macClean, 'ip' => $m['ip'], 'source' => $m['source'] ?? 'unknown', 'error' => 'bulk script returned invalid JSON'];
+                    $failed[] = ['mac' => $macClean, 'ip' => $m['ip'], 'source' => $m['source'] ?? 'unknown', 'error' => 'Bulk script returned invalid JSON; delivery is uncertain. Review handset state before retrying.', 'delivery_uncertain'=>true, 'next_action'=>'diagnostics'];
                 }
                 return ['success' => false, 'error' => 'Bulk script returned invalid JSON: ' . substr($output, 0, 200), 'sent' => $sent, 'downloaded' => $downloaded, 'verified' => $verified, 'failed' => $failed];
             }
@@ -4710,14 +5039,18 @@ class Provisioner implements \BMO {
                 if (isset($seen[$macClean])) continue;
                 $this->finishFetchObservation($observations[$macClean]);
                 $this->setPushTriggerFailed($macClean, $jobId);
-                $failed[] = ['mac' => $macClean, 'ip' => $m['ip'], 'source' => $m['source'] ?? 'unknown', 'error' => 'bulk script returned no result'];
+                $failed[] = ['mac' => $macClean, 'ip' => $m['ip'], 'source' => $m['source'] ?? 'unknown', 'error' => 'Bulk script returned no result; delivery is uncertain. Review handset state before retrying.', 'delivery_uncertain'=>true, 'next_action'=>'diagnostics'];
             }
         }
 
         $verificationPhones = [];
         foreach ($downloaded as $entry) $verificationPhones[strtolower($entry['mac'])] = $entry['ip'];
-        $queued = $this->createPushVerificationJob($jobId, $verificationPhones, $snapshots, $swapGroups);
-        return ['success' => true, 'sent' => $sent, 'downloaded' => $downloaded, 'verified' => $verified, 'failed' => $failed,
+        if ($verificationPhones && $this->rolloutQueueContext) $this->settleRolloutWave();
+        $queued = $this->createPushVerificationJob($jobId, $verificationPhones, $snapshots, $swapGroups, !$this->rolloutQueueContext);
+        if ($queued && $this->rolloutQueueContext) $this->processPushVerificationJob($jobId);
+        $this->waveFetchObserver = null;
+        return ['success' => !$verificationPhones || $queued, 'sent' => $sent, 'downloaded' => $downloaded, 'verified' => $verified, 'failed' => $failed,
+            'error' => $verificationPhones && !$queued ? 'Configs downloaded but background verification could not be queued. Pending changes were retained; review Diagnostics before retrying.' : null,
             'verification_queued' => $queued, 'verification_job' => $queued ? $jobId : null];
     }
 
@@ -4740,7 +5073,47 @@ class Provisioner implements \BMO {
         return $output;
     }
 
+    private function runBoundedNotifyCommand($command) {
+        if (!$this->rolloutQueueContext) return shell_exec($command);
+        $pipes = [];
+        $process = proc_open('exec ' . $command, [0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']], $pipes);
+        if (!is_resource($process)) return null;
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false); stream_set_blocking($pipes[2], false);
+        $output = ''; $start = microtime(true);
+        try {
+            do {
+                $this->rolloutQueueContext->heartbeat();
+                $output .= stream_get_contents($pipes[1]);
+                stream_get_contents($pipes[2]);
+                if (strlen($output) > 1048576 || microtime(true)-$start > 30) throw new \RuntimeException('Notification process exceeded its bounds. Delivery is uncertain.');
+                $status = proc_get_status($process);
+                if (!$status['running']) { $output .= stream_get_contents($pipes[1]); break; }
+                usleep(100000);
+            } while (true);
+        } finally {
+            if (proc_get_status($process)['running']) proc_terminate($process, 9);
+            fclose($pipes[1]); fclose($pipes[2]); proc_close($process);
+        }
+        return $output;
+    }
+
+    protected function dispatchRolloutPhones($phones, $command) {
+        return $this->runBoundedNotifyCommand($command);
+    }
+
+    protected function settleRolloutWave() {
+        $seconds = (int)$this->getSetting('rollout_settle_seconds');
+        $seconds = $seconds > 0 ? max(5,min(120,$seconds)) : 20;
+        $until = microtime(true)+$seconds;
+        do {
+            $this->rolloutQueueContext->heartbeat();
+            usleep(250000);
+        } while (microtime(true) < $until);
+    }
+
     private function notifySingleSync($mac, $ip, $source = 'arp', $finalize = true) {
+        if ($this->shouldQueuePush()) return $this->pushToPhones([$mac]);
         if ($this->getPushIdentityError($ip, $mac)) return false;
         $pbxIp = $this->getSetting('pbx_ip') ?: $this->getLocalIP();
         $notify = $this->getNotifyDefinition($mac, $pbxIp);
@@ -4866,7 +5239,8 @@ class Provisioner implements \BMO {
                 if ($groupBlocked) $reason = 'extension swap group is incomplete or one member has no verified target';
                 else $reason = !empty($targets[$macClean]['conflict']) ? $targets[$macClean]['conflict_message'] : ($targets[$macClean]['blocked_reason'] ?? 'no valid private IP candidate');
                 $this->addLog('notify', "NOTIFY skipped MAC:$macClean — $reason", 'warning');
-                $bulk['failed'][] = ['mac' => $macClean, 'error' => $reason];
+                $bulk['failed'][] = ['mac' => $macClean, 'error' => $reason,
+                    'next_action' => !$ip ? ($targets[$macClean]['next_action'] ?? 'discovery') : 'diagnostics'];
             }
         }
 
@@ -4878,6 +5252,10 @@ class Provisioner implements \BMO {
         $result['push_macs'] = $allMacs;
         $result['verification_queued'] = $bulk['verification_queued'] ?? false;
         $result['verification_job'] = $bulk['verification_job'] ?? null;
+        if (empty($bulk['success']) && !empty($bulk['error'])) {
+            $result['success'] = false;
+            $result['error'] = $bulk['error'];
+        }
         return $result;
     }
 
@@ -4912,7 +5290,7 @@ class Provisioner implements \BMO {
                 } catch (\Exception $e) {}
                 $reason = !empty($targets[$mac]['conflict']) ? $targets[$mac]['conflict_message'] : ($targets[$mac]['blocked_reason'] ?? 'no valid private IP candidate');
                 $this->addLog('notify', "NOTIFY skipped MAC:$mac ext:{$d['extension']} — $reason", 'warning');
-                $bulk['failed'][] = ['mac' => $mac, 'error' => $reason];
+                $bulk['failed'][] = ['mac' => $mac, 'error' => $reason, 'next_action' => $targets[$mac]['next_action'] ?? 'discovery'];
             }
         }
 
@@ -4971,7 +5349,7 @@ class Provisioner implements \BMO {
         foreach ($macs as $m) {
             if (empty($targets[$m]['selected_ip'])) {
                 $reason = !empty($targets[$m]['conflict']) ? $targets[$m]['conflict_message'] : ($targets[$m]['blocked_reason'] ?? 'IP not found');
-                $notFound[] = ['mac' => $m, 'error' => $reason];
+                $notFound[] = ['mac' => $m, 'error' => $reason, 'next_action' => $targets[$m]['next_action'] ?? 'discovery'];
                 try {
                     $this->db->prepare("UPDATE provisioner_devices SET last_push_status='failed', last_push_attempt_at=NOW(), last_fetch_status='failed', last_verify_status='failed', needs_changes=1 WHERE mac_address=?")->execute([$m]);
                 } catch (\Exception $e) {}
@@ -4988,10 +5366,7 @@ class Provisioner implements \BMO {
         $result = $this->addDevice($mac, $extension, $description, $brand, $ip);
         $notifyResult = null;
         if ($result['success']) {
-            $this->applyChanges(true, false);
-            if ($ip) {
-                $notifyResult = $this->sendSipNotify($ip, $mac);
-            }
+            $notifyResult = $this->pushToPhones([$mac]);
         }
         $result['notify'] = $notifyResult;
         return $result;
@@ -5017,7 +5392,7 @@ class Provisioner implements \BMO {
             'pullPhoneConfig', 'revertConfigTemplate', 'getCustomBackupInfo', 'restoreCustomBackup',
             'pullSelectedConfigFiles', 'revertSelectedConfigFiles',
             'fetchPhoneConfig', 'saveAsActiveConfig',
-            'scanNetwork', 'autoDiscoverFromPjsip', 'startDiscoveryScan', 'startIdentifyMac', 'getDiscoveryJobStatus',
+            'scanNetwork', 'autoDiscoverFromPjsip', 'startDiscoveryScan', 'startIdentifyMac', 'getDiscoveryJobStatus', 'testDiscoveryCallback',
             'applyChangesWithNotify', 'pushConfigToPhones', 'verifyPushStatus', 'getPushProgress',
             'retryPushForPhones', 'pushToPhones'
         ];
@@ -5259,6 +5634,9 @@ class Provisioner implements \BMO {
 
             case 'getDiscoveryJobStatus':
                 return $this->getDiscoveryJobStatus($_REQUEST['job_id'] ?? '');
+
+            case 'testDiscoveryCallback':
+                return $this->testDiscoveryCallback();
 
             case 'autoDiscoverFromPjsip':
                 return $this->autoDiscoverFromPjsip();
