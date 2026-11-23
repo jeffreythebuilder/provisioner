@@ -4,14 +4,8 @@ Provisioner manages supported SIP phones in FreePBX: map a handset MAC address t
 
 ## 1. Install
 
-1. In FreePBX, open **Admin → Module Admin → Upload Modules** and upload the Provisioner package, or copy the module directory to `/var/www/html/admin/modules/provisioner`.
-2. Install or upgrade the module:
-
-   ```sh
-   fwconsole ma install provisioner
-   fwconsole reload
-   ```
-
+1. Open **Admin → Module Admin → Upload Modules** and use the [release package URL in the README](../README.md#install). If you already downloaded the `.tar.gz`, upload that file through the same screen.
+2. Return to Module Admin and select **Install** or **Upgrade** for Provisioner, then confirm. Do not copy files into the installed module directory or edit the database or crontab manually.
 3. Open **Admin → Provisioner → Settings** and set the PBX address, provisioning directory, deployment mode, SIP port/transport, and any credentials required by the supported phone family.
 
 Provisioner does not require DHCP for discovery or provisioning. DHCP can still be used by phones for their own network address and by the PBX for lease-based discovery.
@@ -54,10 +48,11 @@ Use **Push Config** for selected phones or **Apply Pending** for the intended pe
 
 The push stages are distinct:
 
-1. Generate or reuse the configuration.
-2. Send the SIP trigger.
-3. Confirm the handset downloaded the configuration.
-4. Verify the final registration, IP, and MAC identity.
+1. Check the target and handset identity.
+2. Generate or reuse the configuration.
+3. Send the SIP trigger.
+4. Confirm the handset downloaded the configuration.
+5. Verify the final registration, IP, and MAC identity.
 
 A SIP `200 OK` confirms acceptance of the NOTIFY request, not that the phone downloaded or applied the file. Use **Diagnostics** and **Batch Reports** for stage-specific evidence.
 
@@ -69,7 +64,7 @@ Provisioning these settings enables handset feature-code signaling; it does not 
 
 ## 7. Reports and retries
 
-Batch Reports retain the phone/MAC snapshot and each provisioning stage. Search, sorting, filters, page size, and expanded details are preserved during live refresh. CSV export contains the full report, not only the visible page.
+Open **Logs → Batch Reports** to see the phone/MAC snapshot and each provisioning stage. Search, sorting, filters, page size, and expanded details are preserved during live refresh. CSV export contains the full report, not only the visible page.
 
 **Retry Eligible Phones** rechecks identity and retries the complete eligible scope of the report. Search and filters change what is displayed, not what the retry action includes.
 

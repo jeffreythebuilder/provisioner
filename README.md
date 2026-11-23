@@ -4,14 +4,15 @@ FreePBX provisioning for Digium and Alcatel/ALE phones.
 
 ## Install
 
-In **Admin → Module Admin → Upload**, use this package URL:
+In **Admin → Module Admin → Upload Modules**, use this package URL:
 
 ```text
 https://github.com/jeffreythebuilder/provisioner/releases/download/v1.4.59/provisioner-1.4.59.tar.gz
 ```
 
-The current release is **1.4.59**. Install and upgrade it through Module Admin;
-do not manually edit the installed files, database, or crontab.
+The current release is **1.4.59**. After uploading, return to Module Admin and
+select **Install** or **Upgrade** for Provisioner. Do not manually edit installed
+files, the database, or crontab.
 
 ## Basic workflow
 
@@ -42,16 +43,8 @@ and on FreePBX 17 with newer MariaDB. Python 3.6 is supported for SIP helpers.
 Config pulling requires Python 3 and the `requests` package. The module does
 not install operating-system or Python packages.
 
-## Development checks
+## More information
 
-From the module directory:
-
-```sh
-sh tests/run
-```
-
-MariaDB integration tests are opt-in and use an isolated private database:
-
-```sh
-unshare --net -- python3 tests/run_mariadb.py
-```
+- [User Guide](docs/USER_GUIDE.md) — setup, provisioning, and troubleshooting.
+- [Operations and Development](docs/OPERATIONS.md) — network requirements, tests, and releases.
+- [Rollout Safeguards](ROLLOUT-SAFEGUARDS.md) — verification and recovery behavior.
